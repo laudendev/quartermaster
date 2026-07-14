@@ -3,11 +3,13 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	_ "modernc.org/sqlite"
 	"strings"
+
 	"time"
 )
 
@@ -78,10 +80,10 @@ func (s *Store) Enqueue(paddleTxn, product, email string, seats int) error {
 }
 
 type SignRequest struct {
-	ID      string
-	Product string
-	Email   string
-	Seats   int
+	ID      string `json:"id"`
+	Product string `json:"product"`
+	Email   string `json:"email"`
+	Seats   int    `json:"seats"`
 }
 
 func (s *Store) NextPending() (*SignRequest, error) {
@@ -111,4 +113,24 @@ func (s *Store) Reject(id, note string) error {
 		 WHERE id = ? AND status = 'pending'`,
 		note, id)
 	return err
+}
+
+// WaitPending polls for pending work until timeout or ctx cancellation.
+// Returns (nil, nil) on timeout with an empty queue.
+func (s *Store) WaitPending(ctx context.Context, timeout time.Duration) (*SignRequest, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		r, err := s.NextPending()
+		if r != nil || err != nil {
+			return r, err
+		}
+		if time.Now().After(deadline) {
+			return nil, nil
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
