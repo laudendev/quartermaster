@@ -1,0 +1,14 @@
+# Signing keys - private key must NEVER be commited
+signing.key
+signing.pub
+*.key
+
+# Binaries (go build artifacts)
+/keygen
+/quartermaster
+
+# Local state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
