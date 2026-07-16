@@ -21,6 +21,9 @@ func main() {
 	mux.HandleFunc("GET /queue/wait", qa.wait)
 	mux.HandleFunc("POST /queue/complete", qa.complete)
 
+	sa := &stripeAPI{st: st, secret: "REDACTED"}
+	mux.HandleFunc("POST /stripe/webhook", sa.webhook)
+
 	srv := &http.Server{
 		Addr:    "127.0.0.1:9090", // dev; 10.8.0.1:9090 in prod config
 		Handler: mux,

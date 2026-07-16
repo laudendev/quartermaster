@@ -6,6 +6,7 @@ signing.pub
 # Binaries (go build artifacts)
 /keygen
 /quartermaster
+/cmd/quartermaster/quartermaster
 
 # Local state
 *.db

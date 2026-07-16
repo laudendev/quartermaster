@@ -99,12 +99,28 @@ func (s *Store) NextPending() (*SignRequest, error) {
 	return &r, nil
 }
 
-func (s *Store) Complete(id, licenseKey string) error {
-	_, err := s.db.Exec(
+// Complete marks a request signed and returns the customer's email
+// for delivery. Returns ("", nil) if the row didn't transition
+// (already handled, or didn't exist).
+func (s *Store) Complete(id, licenseKey string) (string, error) {
+	res, err := s.db.Exec(
 		`UPDATE sign_requests SET status = 'signed', license_key = ?, signed_at = ?
 		 WHERE id = ? AND status = 'pending'`,
 		licenseKey, time.Now().Unix(), id)
-	return err
+	if err != nil {
+		return "", err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return "", err // no row transitioned; nothing to email
+	}
+
+	var email string
+	row := s.db.QueryRow(`SELECT email FROM sign_requests WHERE id = ?`, id)
+	if err := row.Scan(&email); err != nil {
+		return "", err
+	}
+	return email, nil
 }
 
 func (s *Store) Reject(id, note string) error {
