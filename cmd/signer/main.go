@@ -17,6 +17,8 @@ import (
 	"quartermaster/license"
 )
 
+const quartermasterBaseURL = "http://10.46.0.1:9090"
+
 func loadSigningKey(path string) (ed25519.PrivateKey, error) {
 	hexBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -116,7 +118,7 @@ func main() {
 	}
 	log.Println("signing key loaded,", len(priv), "bytes")
 
-	req, err := pollOnce("http://localhost:9090")
+	req, err := pollOnce(quartermasterBaseURL)
 	if err != nil {
 		log.Fatal("poll: ", err)
 	}
@@ -129,14 +131,14 @@ func main() {
 	key, err := issueFor(priv, req)
 	if err != nil {
 		log.Println("issue failed:", err)
-		if err := postReject("http://localhost:9090", req.ID, err.Error()); err != nil {
+		if err := postReject(quartermasterBaseURL, req.ID, err.Error()); err != nil {
 			log.Println("reject post failed:", err)
 		}
 		return
 	}
 	log.Println("issued key:", key)
 
-	if err := postComplete("http://localhost:9090", req.ID, key); err != nil {
+	if err := postComplete(quartermasterBaseURL, req.ID, key); err != nil {
 		log.Println("complete post failed:", err)
 		return
 	}

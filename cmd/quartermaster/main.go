@@ -18,20 +18,31 @@ func main() {
 	log.Println("store open")
 
 	qa := &queueAPI{st: st}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /queue/wait", qa.wait)
-	mux.HandleFunc("POST /queue/complete", qa.complete)
+	queueMux := http.NewServeMux()
+	queueMux.HandleFunc("GET /queue/wait", qa.wait)
+	queueMux.HandleFunc("POST /queue/complete", qa.complete)
 
 	sa := &stripeAPI{st: st, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
-        //"REDACTED"
-	mux.HandleFunc("POST /stripe/webhook", sa.webhook)
 
-	srv := &http.Server{
-		Addr:    "127.0.0.1:9090", // dev; 10.8.0.1:9090 in prod config
-		Handler: mux,
+	webhookMux := http.NewServeMux()
+	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
+
+	queueSrv := &http.Server{
+		Addr:    "10.46.0.1:9090",
+		Handler: queueMux,
 	}
-	log.Println("queue API on", srv.Addr)
-	log.Fatal(srv.ListenAndServe())
+	webhookSrv := &http.Server{
+		Addr:  "127.0.0.1:6773",
+		Handler: webhookMux,
+	}
+
+	go func() {
+	    log.Println("webhook server on", webhookSrv.Addr)
+	    log.Fatal(webhookSrv.ListenAndServe())
+        }()
+
+	log.Println("queue API on", queueSrv.Addr)
+	log.Fatal(queueSrv.ListenAndServe())
 }
 
 func requireEnv(key string) string {

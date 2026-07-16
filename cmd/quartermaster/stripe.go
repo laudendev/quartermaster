@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,22 +43,26 @@ type stripeEvent struct {
 func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Println("stripe webhook: failed to read body:", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	if !s.verifySignature(r.Header.Get("Stripe-Signature"), body) {
+		log.Println("stripe webhook: signature verification failed")
 		http.Error(w, "invalid signature", http.StatusBadRequest)
 		return
 	}
 
 	var evt stripeEvent
 	if err := json.Unmarshal(body, &evt); err != nil {
+                log.Println("stripe webhook: failed to parse payload:", err)
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
 
 	if evt.Type != "checkout.session.completed" {
+		log.Println("stripe webhook: ignoring event type", evt.Type)
 		w.WriteHeader(http.StatusOK) // acknowledge, ignore other event types
 		return
 	}
@@ -66,6 +71,10 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(obj.CustomerDetails.Address.Country, "US") {
 		// Out of the market we're registered to sell in. Acknowledge the
 		// webhook so Stripe doesn't retry, but never enqueue.
+		log.Println("stripe webhook: rejecting non-US checkout, session",
+		            obj.ID,
+			    "country",
+			    obj.CustomerDetails.Address.Country)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -75,10 +84,12 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 		seats = 1
 	}
 
-	if err := s.st.Enqueue(obj.ID, obj.Metadata.Product, obj.CustomerDetails.Email, seats); err != nil {
+	if err := s.st.Enqueue(obj.ID, obj.Metadata.Product, obj.CustomerDetails.Email, seats); err != nil {    
+		log.Println("stripe webhook: enqueue failed for session", obj.ID, ":", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	log.Println("stripe webhook: enqueued session", obj.ID, "product", obj.Metadata.Product, "email", obj.CustomerDetails.Email)
 	w.WriteHeader(http.StatusOK)
 }
 

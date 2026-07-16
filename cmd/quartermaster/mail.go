@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/resend/resend-go/v3"
 )
 
 var resendAPIKey = requireEnv("RESEND_API_KEY") 
-
-//"REDACTED" // dev key
 
 func sendLicenseEmail(to, licenseKey string) error {
 	client := resend.NewClient(resendAPIKey)
@@ -26,6 +25,6 @@ func sendLicenseEmail(to, licenseKey string) error {
 	if err != nil {
 		return fmt.Errorf("resend send failed: %w", err)
 	}
-	_ = sent // sent.Id available if you want to log it
+	log.Println("resend accepted, id:", sent.Id)
 	return nil
 }
