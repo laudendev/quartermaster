@@ -2,6 +2,7 @@
 package main
 
 import (
+	"os"
 	"log"
         "net/http"
 	"quartermaster/store"
@@ -21,7 +22,8 @@ func main() {
 	mux.HandleFunc("GET /queue/wait", qa.wait)
 	mux.HandleFunc("POST /queue/complete", qa.complete)
 
-	sa := &stripeAPI{st: st, secret: "REDACTED"}
+	sa := &stripeAPI{st: st, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
+        //"REDACTED"
 	mux.HandleFunc("POST /stripe/webhook", sa.webhook)
 
 	srv := &http.Server{
@@ -30,4 +32,12 @@ func main() {
 	}
 	log.Println("queue API on", srv.Addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+func requireEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+	   log.Fatalf("missing required env var: %s", key)
+        }
+	return v
 }

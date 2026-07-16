@@ -7,7 +7,9 @@ import (
 	"github.com/resend/resend-go/v3"
 )
 
-const resendAPIKey = "REDACTED" // dev key
+var resendAPIKey = requireEnv("RESEND_API_KEY") 
+
+//"REDACTED" // dev key
 
 func sendLicenseEmail(to, licenseKey string) error {
 	client := resend.NewClient(resendAPIKey)
