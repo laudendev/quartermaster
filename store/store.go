@@ -214,3 +214,17 @@ func (s *Store) Deactivate(licenseID, fingerprint string) error {
 		licenseID, fingerprint)
 	return err
 }
+
+// IsActivated checks whether this specific license+fingerprint pair
+// is already activated — distinct from CountActivations, which counts
+// all seats regardless of which machine holds them.
+func (s *Store) IsActivated(licenseID, fingerprint string) (bool, error) {
+	var count int
+	row := s.db.QueryRow(
+		`SELECT COUNT(*) FROM activations WHERE license_id = ? AND fingerprint = ? AND revoked = 0`,
+		licenseID, fingerprint)
+	if err := row.Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}

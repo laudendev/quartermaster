@@ -4,9 +4,23 @@ package main
 import (
 	"os"
 	"log"
+	"crypto/ed25519"
+	"encoding/hex"
         "net/http"
 	"quartermaster/store"
 )
+
+func loadPublicKey(path string) (ed25519.PublicKey, error) {
+	hexBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	keyBytes, err := hex.DecodeString(string(hexBytes))
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.PublicKey(keyBytes), nil
+}
 
 func main() {
 	st, err := store.Open("quartermaster.db")
@@ -24,8 +38,17 @@ func main() {
 
 	sa := &stripeAPI{st: st, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
 
+	pub, err := loadPublicKey("signing.pub")
+	if err != nil {
+	    log.Fatal("loading public key: ", err)
+        }
+
+	aa := &activationAPI{st: st, pub: pub}
+
 	webhookMux := http.NewServeMux()
 	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
+	webhookMux.HandleFunc("POST /license/activate", aa.activate)
+	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 
 	queueSrv := &http.Server{
 		Addr:    "10.46.0.1:9090",
