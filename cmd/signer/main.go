@@ -110,7 +110,6 @@ func postReject(baseURL, id, note string) error {
 	}
 	return nil
 }
-
 func main() {
 	priv, err := loadSigningKey("signing.key")
 	if err != nil {
@@ -118,29 +117,32 @@ func main() {
 	}
 	log.Println("signing key loaded,", len(priv), "bytes")
 
-	req, err := pollOnce(quartermasterBaseURL)
-	if err != nil {
-		log.Fatal("poll: ", err)
-	}
-	if req == nil {
-		log.Println("queue empty")
-		return
-	}
-	log.Printf("got request: %+v", req)
-
-	key, err := issueFor(priv, req)
-	if err != nil {
-		log.Println("issue failed:", err)
-		if err := postReject(quartermasterBaseURL, req.ID, err.Error()); err != nil {
-			log.Println("reject post failed:", err)
+	for {
+		req, err := pollOnce(quartermasterBaseURL)
+		if err != nil {
+			log.Println("poll error:", err, "- retrying in 5s")
+			time.Sleep(5 * time.Second)
+			continue
 		}
-		return
-	}
-	log.Println("issued key:", key)
+		if req == nil {
+			continue // WaitPending already blocked; loop straight back
+		}
+		log.Printf("got request: %+v", req)
 
-	if err := postComplete(quartermasterBaseURL, req.ID, key); err != nil {
-		log.Println("complete post failed:", err)
-		return
+		key, err := issueFor(priv, req)
+		if err != nil {
+			log.Println("issue failed:", err)
+			if err := postReject(quartermasterBaseURL, req.ID, err.Error()); err != nil {
+				log.Println("reject post failed:", err)
+			}
+			continue
+		}
+		log.Println("issued key:", key)
+
+		if err := postComplete(quartermasterBaseURL, req.ID, key); err != nil {
+			log.Println("complete post failed:", err)
+		} else {
+			log.Println("posted complete")
+		}
 	}
-	log.Println("posted complete")
 }
