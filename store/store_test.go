@@ -47,7 +47,7 @@ func TestEnqueueIdempotent(t *testing.T) {
 	}
 
 	var count int
-	row := s.db.QueryRow(`SELECT COUNT(*) FROM sign_requests WHERE paddle_txn = ?`, "txn_dup")
+	row := s.db.QueryRow(`SELECT COUNT(*) FROM sign_requests WHERE txn_id = ?`, "txn_dup")
 	if err := row.Scan(&count); err != nil {
 		t.Fatal(err)
 	}

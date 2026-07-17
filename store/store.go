@@ -20,7 +20,7 @@ type Store struct {
 const schema = `
 CREATE TABLE IF NOT EXISTS sign_requests (
     id           TEXT PRIMARY KEY,
-    paddle_txn   TEXT UNIQUE NOT NULL,
+    txn_id   TEXT UNIQUE NOT NULL,
     product      TEXT NOT NULL,
     email        TEXT NOT NULL,
     seats        INTEGER NOT NULL,
@@ -77,16 +77,16 @@ func newID() (string, error) {
 }
 
 // Enqueue records a sign request. Safe to call repeatedly with the
-// same paddle_txn: duplicates are absorbed (webhook retries).
-func (s *Store) Enqueue(paddleTxn, product, email string, seats int) error {
+// same txnID (transaction ID): duplicates are absorbed (webhook retries).
+func (s *Store) Enqueue(txnID, product, email string, seats int) error {
 	id, err := newID()
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO sign_requests (id, paddle_txn, product, email, seats, created_at)
+		`INSERT INTO sign_requests (id, txn_id, product, email, seats, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, paddleTxn, product, email, seats, time.Now().Unix(),
+		id, txnID, product, email, seats, time.Now().Unix(),
 	)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return nil // retry absorbed; row already exists
