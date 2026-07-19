@@ -29,6 +29,11 @@ needs local access to build and restart the signer.
 Both binaries are deployed by one script, one run, from one machine.
 There is no separate signer deploy process.
 
+**`deploy.sh` does not copy `signing.pub` to the droplet.** If the
+signing key has been rotated, `signing.pub` must be copied to the
+droplet and `quartermaster` restarted separately — see "Rotating
+the key" below.
+
 Confirmed working end to end: full redeploy plus a live test Stripe
 checkout.
 
@@ -43,7 +48,9 @@ go run .
 ```
 
 This writes `signing.key` (mode `0600`) and `signing.pub` (mode
-`0644`) to the current directory.
+`0644`) to the current directory. Move both into the repo root
+(`~/quartermaster/`), where the signer's systemd unit expects them
+(`WorkingDirectory=/home/tylerl/quartermaster`).
 
 **`signing.key` never leaves the signer machine, ever, under any
 circumstance.** It is not committed to git (`.gitignore` enforces
@@ -52,14 +59,38 @@ droplet, not emailed, not pasted into a chat tool. If this file is
 ever exposed, treat it as a full compromise — see "Incident: signing
 key exposure" below.
 
+**`signing.key` is also not preserved by any git-based backup or
+history-rewrite tooling** — it is gitignored by design, so a fresh
+clone, a history scrub, or a directory reorganization will never
+carry it along. If the working directory is ever renamed, moved, or
+replaced with a fresh clone, `signing.key` and `signing.pub` must be
+manually copied into the new location, or the signer will fail to
+start (`loading signing key: open signing.key: no such file or
+directory`). This exact failure occurred on 2026-07-19 during a git
+history rewrite that swapped the working directory — see "Observed
+in practice" below.
+
 `signing.pub` is not sensitive. It needs to exist in three places:
-- On the droplet, loaded by `quartermaster` at startup
-  (`activation.go`'s `activationAPI.pubs`) to verify licenses during
-  activation.
+- On the droplet, at `/opt/quartermaster/signing.pub`, loaded by
+  `quartermaster` at startup (`activation.go`'s
+  `activationAPI.pubs`) to verify licenses during activation.
 - Embedded in every customer-facing application, to verify licenses
   fully offline.
-- Recorded in this document's rotation history (below), so every
-  public key that has ever been live is permanently on record.
+- Recorded below, so the current key is always known from this
+  document alone.
+
+### Current signing key
+
+| Public key (hex) | Live since |
+|---|---|
+| `eba29494abda910c3670ab0aab126cbca5062130f54c3ad0bcbc9d5aa8d6b9ca` | 2026-07-19 |
+
+No real license has been issued under any prior key, so there is no
+rotation history to preserve yet — this is simply the current key,
+recorded here for reference. Once a real rotation happens after real
+licenses exist, this section becomes a full rotation history table
+(see "Rotation model" below for what that will need to track: every
+key that was ever live, its date range, and why it was rotated).
 
 ### Rotation model
 
@@ -88,28 +119,27 @@ them) and only continues trying additional keys on `ErrSignature`.
 See `license/license_test.go` for the behavior this rotation model
 depends on.
 
-### Rotation history
-
-Record every key that has ever been live here, so the full list a
-client should embed is always known from this document alone.
-
-| Public key (hex) | Live from | Live until | Reason |
-|---|---|---|---|
-| `<TY: paste the output of signing.pub here>` | `<issue date>` | current | Initial key |
-
 ### Rotating the key
 
 1. Generate a new keypair (`cmd/keygen`), on the signer machine.
-2. Add the new public key to the rotation history table above.
-3. In `cmd/quartermaster/main.go`, append the new key to the slice
-   passed into `activationAPI{pubs: ...}`. Keep the old key in the
-   slice — never remove a historical key. Redeploy.
+2. If real licenses exist under the current key, add the new key to
+   a rotation history table (promote the single-row table above into
+   a full history) and append it to `activationAPI.pubs` in
+   `cmd/quartermaster/main.go` — keep the old key too, never remove
+   a historical key once real licenses depend on it. If no real
+   licenses exist yet, a clean single-key replacement is fine, as
+   was done on 2026-07-19.
+3. Copy `signing.pub` to the droplet (`deploy.sh` does not do this
+   automatically):
+```bash
+   scp signing.pub ty@qmaster:/opt/quartermaster/signing.pub
+   ssh qmaster "sudo systemctl restart quartermaster"
+```
 4. Ship a client app update that adds the new public key to its own
-   embedded list, alongside every previous key.
-5. The signer now signs new licenses with the new key. Old licenses,
-   already in customers' hands, still verify because the old public
-   key is still present in both the droplet's and the client's
-   embedded lists.
+   embedded list, alongside every previous key (only relevant once
+   real clients exist and real licenses have been issued under a
+   prior key).
+5. The signer now signs new licenses with the new key.
 
 ## Backups
 
@@ -229,13 +259,37 @@ rm -f /opt/quartermaster/quartermaster.db-wal /opt/quartermaster/quartermaster.d
 systemctl start quartermaster
 ```
 
+## Secret management
+
+Two secrets, both loaded via `/etc/quartermaster.env`
+(`EnvironmentFile=` in the systemd unit): `STRIPE_WEBHOOK_SECRET` and
+`RESEND_API_KEY`. Both must **only** ever exist there — never
+hardcoded in source, never committed, never placed anywhere else.
+
+**On 2026-07-19, this rule was violated in early development
+history**: both a Resend API key and a Stripe webhook secret were
+found hardcoded in old commits (`cmd/quartermaster/mail.go` and
+`cmd/quartermaster/main.go` respectively), predating the current
+`requireEnv`/`EnvironmentFile` pattern. GitHub's secret scanning
+caught the Resend key and Resend auto-revoked it; the Stripe secret
+was found by a manual history audit prompted by that alert and
+disabled manually. Both were rotated, and both were scrubbed from
+every commit in the repository's history using `git filter-repo`,
+then force-pushed and independently verified clean against a fresh
+clone from GitHub. See "Incident: secret exposure in git history"
+below for the full procedure, since it will be needed again if this
+ever recurs.
+
+The current pattern (`requireEnv("STRIPE_WEBHOOK_SECRET")`,
+`requireEnv("RESEND_API_KEY")`, both reading from the process
+environment only) is correct and does not have this problem — this
+incident was entirely contained to old, pre-refactor history.
+
 ## Webhook secret rotation
 
 `STRIPE_WEBHOOK_SECRET` authenticates every request to
-`/stripe/webhook`, set in `/etc/quartermaster.env` on the droplet
-(loaded via the unit's `EnvironmentFile=`). If it's ever suspected
-to have leaked (see "Incident: webhook secret leak" below), rotate
-it:
+`/stripe/webhook`, set in `/etc/quartermaster.env` on the droplet.
+If it's ever suspected to have leaked, rotate it:
 
 1. In the Stripe dashboard, add a new webhook signing secret for the
    `quartermaster.<domain>/stripe/webhook` endpoint.
@@ -243,9 +297,14 @@ it:
    droplet.
 3. `systemctl restart quartermaster`.
 4. Send a test webhook from the Stripe dashboard and confirm a `200`
-   in the logs.
+   and an `enqueued session` log line.
 5. Revoke the old secret in the Stripe dashboard once the new one is
    confirmed working.
+6. **Confirm the webhook endpoint itself is enabled in Stripe's
+   dashboard** — a disabled endpoint produces no delivery attempts
+   at all and can look identical to a broken secret or a dead
+   service from the operator's side. This cost real debugging time
+   on 2026-07-19; check it first, not last.
 
 Rotation is cheap. If in doubt, rotate — there's no meaningful cost
 to doing this preemptively versus waiting for certainty of
@@ -278,18 +337,134 @@ wrong machine, leaked any other way):
    this key — they will continue to verify forever, by design (see
    `docs/license-scheme.md`).
 2. Generate a new keypair immediately (`cmd/keygen`).
-3. Follow "Rotating the key" above — this is a fully-supported,
-   tested procedure.
+3. Follow "Rotating the key" above.
 4. Update the droplet and ship a client update per that procedure.
 5. All *future* licenses are signed with the new key. Every license
    already issued, under the old key, keeps working, because the old
    key remains in the embedded list on both the droplet and client
-   apps.
+   apps — unless no real licenses had been issued yet, in which case
+   a clean replacement with no old-key preservation is appropriate.
 
-## Incident: webhook secret leak
+## Incident: signing key lost (not exposed — simply missing)
 
-See "Webhook secret rotation" above — rotate immediately, don't wait
-for confirmation.
+Distinct from exposure: `signing.key` is gitignored by design and is
+never carried along by git-based tooling — a fresh clone, a
+directory rename, or a history rewrite that swaps the working
+directory will leave it behind. If the signer fails to start with
+`loading signing key: open signing.key: no such file or directory`:
+
+1. Check whether the key exists in a previous/renamed version of the
+   working directory before assuming it's gone.
+2. If truly lost and no real licenses have been issued yet under it,
+   treat this the same as a routine rotation: generate a fresh
+   keypair, deploy the new public key, done — no compatibility
+   concerns.
+3. If real licenses *have* been issued under the lost key, this
+   becomes equivalent to a key exposure incident in terms of
+   procedure, except the risk is unavailability of the old key for
+   future verification rather than forgery — the old key must be
+   sourced from a backup (if one exists) or those licenses will need
+   an alternative verification path. This is exactly why a
+   `signing.key` backup strategy (separate from this repo's git
+   history, per its "never leaves the signer machine" rule) should
+   be revisited before real licenses are issued at volume.
+
+## Incident: secret exposure in git history
+
+If a real secret (API key, webhook secret, etc.) is found hardcoded
+in any commit, past or present:
+
+1. **Rotate or revoke the secret at its source immediately** — this
+   is the actual time-sensitive step. A secret sitting in git
+   history is not neutralized just by removing it from the current
+   file; the old commit still has it until history is rewritten, and
+   rewriting takes real time to do safely. Kill the credential first.
+2. Identify every commit containing it:
+```bash
+   git log --all --oneline -S"<the secret string>"
+```
+3. Make a full local backup of the repo before doing anything
+   destructive:
+```bash
+   cp -r quartermaster quartermaster-backup-before-scrub
+```
+4. Clone fresh with `--no-local` (required — `git filter-repo`
+   refuses to run against a repo that shares local object storage
+   with another):
+```bash
+   git clone --no-local quartermaster quartermaster-scrub
+   cd quartermaster-scrub
+```
+5. Rewrite history:
+```bash
+   git filter-repo --replace-text <(echo '<secret>==>REDACTED')
+```
+6. Verify locally:
+```bash
+   git log --all -p | grep "<secret>"
+```
+   Must be empty.
+7. Force-push:
+```bash
+   git remote add origin https://github.com/laudendev/quartermaster.git
+   git push origin --force --all
+   git push origin --force --tags
+```
+8. **Verify against a completely fresh clone from GitHub itself**,
+   not just local state — this is the only real proof of what's
+   actually published:
+```bash
+   cd /tmp
+   git clone https://github.com/laudendev/quartermaster.git verify
+   cd verify
+   git log --all -p | grep "<secret>"
+```
+   Must be empty.
+9. Check whether any tag or GitHub Release was affected. If a
+   release's `target_commitish` is a branch name (e.g. `master`)
+   rather than a fixed commit, it survives a force-push
+   automatically — confirm with:
+```bash
+   gh api repos/laudendev/quartermaster/releases/tags/<tag> --jq .target_commitish
+```
+   If pinned to a commit hash instead, the release will need to be
+   deleted and recreated against the new hash.
+10. **Swap the working directory over to the cleaned clone** and
+    remember to manually copy `signing.key`/`signing.pub` into it —
+    see "Incident: signing key lost" above, since this exact swap
+    caused that incident on 2026-07-19.
+11. Delete old backup directories once fully confident the scrub is
+    solid — they still contain the exposed secret in local history.
+
+This procedure was used twice on 2026-07-19, for a Resend API key
+and a Stripe webhook secret, both found hardcoded in commits
+predating the current `requireEnv`-based secret handling. Both were
+successfully scrubbed and verified clean against a fresh clone from
+`https://github.com/laudendev/quartermaster`.
+
+## Observed in practice
+
+On 2026-07-19, during the git history scrub above, a directory swap
+(`mv quartermaster quartermaster-old`, `mv quartermaster-scrub
+quartermaster`) left `signing.key` and `signing.pub` behind in the
+renamed old directory, since they are gitignored and never travel
+with any git operation. The signer crash-looped for several hours
+(`loading signing key: open signing.key: no such file or directory`)
+before this was noticed and a fresh keypair was generated to replace
+the lost one — an acceptable resolution since no real license had
+yet been issued.
+
+During the entire outage, `quartermaster` continued operating
+normally: a test webhook was accepted, verified, and enqueued while
+the signer was completely down. Nothing was lost, nothing errored on
+the customer-facing side. The moment the signer was restored (with a
+new key), it immediately picked up the queued request, signed it,
+and the resulting license email was delivered — with no manual
+intervention beyond fixing the signer itself.
+
+This is the split-key architecture's central claim — that a signer
+outage never becomes a quartermaster outage — observed under a real,
+unplanned fault rather than only reasoned about in the abstract.
 
 ## Support: customer never received their license email
 
