@@ -56,6 +56,42 @@ already sold.
 
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
+## How licensing actually treats the customer
+
+Most licensing platforms treat every activation as suspicious by
+default — lock a key to one machine forever, require a support
+ticket to reinstall, make resale effectively impossible. I built the
+opposite of that, on purpose.
+
+A license here behaves like a physical good. Deactivate it, and the
+seat is free — hand it to someone else, they activate fresh, no
+different from reselling a used copy of anything else. The platform
+never tries to track *who* owns a license after the first sale, only
+*how many machines* are using it at once. A refund or a chargeback
+doesn't retroactively break a machine that's already running
+legitimately, either — that's treated as an accepted, bounded cost,
+not a bug to engineer away.
+
+What it does stop, hard: one key posted publicly and claimed by an
+unlimited number of strangers at once. The moment more distinct,
+never-before-seen machines try to activate than the license has
+seats for, the request is refused outright — the seat count is the
+actual enforcement, not machine-tracking, not phone-home, not
+periodic re-validation.
+
+And once a machine is activated, that's it — verification is fully
+offline, forever, for every subsequent launch. No check-in, no
+expiry, no dependency on my server staying up. The one and only
+network call in the entire lifecycle is the first activation itself.
+
+Both halves rest on the same idea: the server only ever needs to
+know *how many* machines are using a license, never *which* person
+owns it. That's what makes it possible to be generous about resale
+and reinstalling while still being strict about the one thing that
+actually costs money — mass key sharing. The full reasoning, and
+what it deliberately does and doesn't prevent, is in
+[docs/license-scheme.md](docs/license-scheme.md).
+
 ## If you're building something like this
 
 This wasn't built as a teaching example, but it holds up as one,
