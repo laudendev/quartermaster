@@ -1,0 +1,130 @@
+package queue
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+const schema = `
+CREATE TABLE IF NOT EXISTS sign_requests (
+    id           TEXT PRIMARY KEY,
+    txn_id   TEXT UNIQUE NOT NULL,
+    product      TEXT NOT NULL,
+    email        TEXT NOT NULL,
+    seats        INTEGER NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    license_key  TEXT,
+    reject_note  TEXT,
+    created_at   INTEGER NOT NULL,
+    signed_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_status ON sign_requests(status);
+`
+
+func Open(db *sql.DB) (*Store, error) {
+	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func newID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func (s *Store) Enqueue(txnID, product, email string, seats int) error {
+	id, err := newID()
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO sign_requests (id, txn_id, product, email, seats, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, txnID, product, email, seats, time.Now().Unix(),
+	)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return nil
+	}
+	return err
+}
+
+type SignRequest struct {
+	ID      string `json:"id"`
+	Product string `json:"product"`
+	Email   string `json:"email"`
+	Seats   int    `json:"seats"`
+}
+
+func (s *Store) NextPending() (*SignRequest, error) {
+	row := s.db.QueryRow(
+		`SELECT id, product, email, seats FROM sign_requests
+		 WHERE status = 'pending' ORDER BY created_at LIMIT 1`)
+	var r SignRequest
+	if err := row.Scan(&r.ID, &r.Product, &r.Email, &r.Seats); err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Store) Complete(id, licenseKey string) (string, error) {
+	res, err := s.db.Exec(
+		`UPDATE sign_requests SET status = 'signed', license_key = ?, signed_at = ?
+		 WHERE id = ? AND status = 'pending'`,
+		licenseKey, time.Now().Unix(), id)
+	if err != nil {
+		return "", err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return "", err
+	}
+
+	var email string
+	row := s.db.QueryRow(`SELECT email FROM sign_requests WHERE id = ?`, id)
+	if err := row.Scan(&email); err != nil {
+		return "", err
+	}
+	return email, nil
+}
+
+func (s *Store) Reject(id, note string) error {
+	_, err := s.db.Exec(
+		`UPDATE sign_requests SET status = 'rejected', reject_note = ?
+		 WHERE id = ? AND status = 'pending'`,
+		note, id)
+	return err
+}
+
+func (s *Store) WaitPending(ctx context.Context, timeout time.Duration) (*SignRequest, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		r, err := s.NextPending()
+		if r != nil || err != nil {
+			return r, err
+		}
+		if time.Now().After(deadline) {
+			return nil, nil
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,25 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
+	"quartermaster/activations"
 	"quartermaster/license"
-	"quartermaster/store"
 )
+
+func testActivationsStore(t *testing.T) *activations.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s, err := activations.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
 func testLicenseKey(t *testing.T, priv ed25519.PrivateKey, seats int) string {
 	t.Helper()
@@ -21,7 +38,7 @@ func testLicenseKey(t *testing.T, priv ed25519.PrivateKey, seats int) string {
 		t.Fatal(err)
 	}
 	key, err := license.Issue(priv, license.License{
-		Product:  "TRCR",
+		Product:  "BOOK",
 		ID:       id,
 		MajorVer: 1,
 		Seats:    uint16(seats),
@@ -35,10 +52,9 @@ func testLicenseKey(t *testing.T, priv ed25519.PrivateKey, seats int) string {
 
 func TestActivateFirstSeat(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
 	key := testLicenseKey(t, priv, 1)
 
 	body, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": "machine-a"})
@@ -54,13 +70,11 @@ func TestActivateFirstSeat(t *testing.T) {
 
 func TestActivateSeatsExhausted(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
-	key := testLicenseKey(t, priv, 1) // only 1 seat
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
+	key := testLicenseKey(t, priv, 1)
 
-	// First activation succeeds.
 	body1, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": "machine-a"})
 	req1 := httptest.NewRequest("POST", "/license/activate", strings.NewReader(string(body1)))
 	w1 := httptest.NewRecorder()
@@ -69,7 +83,6 @@ func TestActivateSeatsExhausted(t *testing.T) {
 		t.Fatalf("first activation should succeed, got %d", w1.Code)
 	}
 
-	// Second activation, different machine, same 1-seat license — must fail.
 	body2, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": "machine-b"})
 	req2 := httptest.NewRequest("POST", "/license/activate", strings.NewReader(string(body2)))
 	w2 := httptest.NewRecorder()
@@ -82,10 +95,9 @@ func TestActivateSeatsExhausted(t *testing.T) {
 
 func TestActivateSameMachineTwiceIsIdempotent(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
 	key := testLicenseKey(t, priv, 1)
 
 	for i := 0; i < 2; i++ {
@@ -101,11 +113,10 @@ func TestActivateSameMachineTwiceIsIdempotent(t *testing.T) {
 
 func TestActivateMultiSeatAllowsMultipleMachines(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
-	key := testLicenseKey(t, priv, 3) // 3 seats
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
+	key := testLicenseKey(t, priv, 3)
 
 	for _, fp := range []string{"machine-a", "machine-b", "machine-c"} {
 		body, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": fp})
@@ -117,7 +128,6 @@ func TestActivateMultiSeatAllowsMultipleMachines(t *testing.T) {
 		}
 	}
 
-	// 4th machine on a 3-seat license must fail.
 	body, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": "machine-d"})
 	req := httptest.NewRequest("POST", "/license/activate", strings.NewReader(string(body)))
 	w := httptest.NewRecorder()
@@ -129,10 +139,9 @@ func TestActivateMultiSeatAllowsMultipleMachines(t *testing.T) {
 
 func TestActivateRejectsInvalidLicense(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
 
 	body, _ := json.Marshal(map[string]string{"license_key": "TOTALLY-FAKE-KEY", "fingerprint": "machine-a"})
 	req := httptest.NewRequest("POST", "/license/activate", strings.NewReader(string(body)))
@@ -146,10 +155,9 @@ func TestActivateRejectsInvalidLicense(t *testing.T) {
 
 func TestDeactivateFreesSeatForReactivation(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, _ := store.Open(":memory:")
-	defer s.Close()
+	s := testActivationsStore(t)
 
-	api := &activationAPI{st: s, pub: pub}
+	api := &activationAPI{st: s, pubs: []ed25519.PublicKey{pub}}
 	key := testLicenseKey(t, priv, 1)
 
 	activate := func(fp string) int {
@@ -164,7 +172,6 @@ func TestDeactivateFreesSeatForReactivation(t *testing.T) {
 		t.Fatalf("initial activation: expected 200, got %d", code)
 	}
 
-	// Deactivate machine-a.
 	body, _ := json.Marshal(map[string]string{"license_key": key, "fingerprint": "machine-a"})
 	req := httptest.NewRequest("POST", "/license/deactivate", strings.NewReader(string(body)))
 	w := httptest.NewRecorder()
@@ -173,7 +180,6 @@ func TestDeactivateFreesSeatForReactivation(t *testing.T) {
 		t.Fatalf("deactivate: expected 200, got %d", w.Code)
 	}
 
-	// Now machine-b should be able to activate the freed seat.
 	if code := activate("machine-b"); code != http.StatusOK {
 		t.Fatalf("reactivation on new machine: expected 200, got %d", code)
 	}

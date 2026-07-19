@@ -12,8 +12,8 @@ var resendAPIKey string
 
 func getResendAPIKey() string {
 	if resendAPIKey == "" {
-	    resendAPIKey = requireEnv("RESEND_API_KEY")
-        }
+		resendAPIKey = requireEnv("RESEND_API_KEY")
+	}
 	return resendAPIKey
 }
 

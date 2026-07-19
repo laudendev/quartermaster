@@ -2,13 +2,30 @@
 package main
 
 import (
-	"os"
-	"log"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/hex"
-        "net/http"
-	"quartermaster/store"
+	"log"
+	"net/http"
+	"os"
+
+	_ "modernc.org/sqlite"
+
+	"quartermaster/activations"
+	"quartermaster/queue"
 )
+
+func openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
 
 func loadPublicKey(path string) (ed25519.PublicKey, error) {
 	hexBytes, err := os.ReadFile(path)
@@ -23,27 +40,36 @@ func loadPublicKey(path string) (ed25519.PublicKey, error) {
 }
 
 func main() {
-	st, err := store.Open("quartermaster.db")
+	db, err := openDB("quartermaster.db")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer st.Close()
+	defer db.Close()
+
+	q, err := queue.Open(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	a, err := activations.Open(db)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	log.Println("store open")
 
-	qa := &queueAPI{st: st}
+	qa := &queueAPI{st: q}
 	queueMux := http.NewServeMux()
 	queueMux.HandleFunc("GET /queue/wait", qa.wait)
 	queueMux.HandleFunc("POST /queue/complete", qa.complete)
 
-	sa := &stripeAPI{st: st, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
+	sa := &stripeAPI{st: q, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
 
 	pub, err := loadPublicKey("signing.pub")
 	if err != nil {
-	    log.Fatal("loading public key: ", err)
-        }
+		log.Fatal("loading public key: ", err)
+	}
 
-	aa := &activationAPI{st: st, pub: pub}
+	aa := &activationAPI{st: a, pubs: []ed25519.PublicKey{pub}}
 
 	webhookMux := http.NewServeMux()
 	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
@@ -55,14 +81,14 @@ func main() {
 		Handler: queueMux,
 	}
 	webhookSrv := &http.Server{
-		Addr:  "127.0.0.1:6773",
+		Addr:    "127.0.0.1:6773",
 		Handler: webhookMux,
 	}
 
 	go func() {
-	    log.Println("webhook server on", webhookSrv.Addr)
-	    log.Fatal(webhookSrv.ListenAndServe())
-        }()
+		log.Println("webhook server on", webhookSrv.Addr)
+		log.Fatal(webhookSrv.ListenAndServe())
+	}()
 
 	log.Println("queue API on", queueSrv.Addr)
 	log.Fatal(queueSrv.ListenAndServe())
@@ -71,7 +97,7 @@ func main() {
 func requireEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
-	   log.Fatalf("missing required env var: %s", key)
-        }
+		log.Fatalf("missing required env var: %s", key)
+	}
 	return v
 }

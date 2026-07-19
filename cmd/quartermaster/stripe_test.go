@@ -3,20 +3,35 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"strconv"
-	"testing"
-	"time"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"testing"
+	"time"
 
-	"quartermaster/store"
+	_ "modernc.org/sqlite"
+
+	"quartermaster/queue"
 )
 
-// signPayload replicates Stripe's own signing scheme, so tests can
-// construct genuinely valid signatures without needing a real Stripe account.
+func testQueueStore(t *testing.T) *queue.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s, err := queue.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func signPayload(secret, body string, timestamp int64) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(fmt.Sprintf("%d.%s", timestamp, body)))
@@ -58,7 +73,7 @@ func TestVerifySignatureTamperedBody(t *testing.T) {
 func TestVerifySignatureExpiredTimestamp(t *testing.T) {
 	api := &stripeAPI{secret: "whsec_test_secret"}
 	body := `{"type":"checkout.session.completed"}`
-	old := time.Now().Add(-10 * time.Minute).Unix() // older than the 5-minute window
+	old := time.Now().Add(-10 * time.Minute).Unix()
 	header := signPayload("whsec_test_secret", body, old)
 
 	if api.verifySignature(header, []byte(body)) {
@@ -74,8 +89,8 @@ func TestVerifySignatureMalformedHeader(t *testing.T) {
 		"",
 		"garbage",
 		"t=notanumber,v1=abc",
-		"v1=abc", // missing timestamp
-		"t=" + strconv.FormatInt(time.Now().Unix(), 10), // missing signature
+		"v1=abc",
+		"t=" + strconv.FormatInt(time.Now().Unix(), 10),
 	} {
 		if api.verifySignature(badHeader, []byte(body)) {
 			t.Fatalf("expected malformed header %q to fail", badHeader)
@@ -84,12 +99,7 @@ func TestVerifySignatureMalformedHeader(t *testing.T) {
 }
 
 func TestWebhookRejectsNonUSCountry(t *testing.T) {
-	s, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
+	s := testQueueStore(t)
 	api := &stripeAPI{st: s, secret: "whsec_test"}
 
 	body := `{
@@ -101,7 +111,7 @@ func TestWebhookRejectsNonUSCountry(t *testing.T) {
 					"email": "buyer@example.com",
 					"address": {"country": "DE"}
 				},
-				"metadata": {"product": "TRCR", "seats": "1"}
+				"metadata": {"product": "BOOK", "seats": "1"}
 			}
 		}
 	}`
@@ -126,12 +136,7 @@ func TestWebhookRejectsNonUSCountry(t *testing.T) {
 }
 
 func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
-	s, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
+	s := testQueueStore(t)
 	api := &stripeAPI{st: s, secret: "whsec_test"}
 
 	body := `{
@@ -143,7 +148,7 @@ func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
 				},
-				"metadata": {"product": "TRCR", "seats": "2"}
+				"metadata": {"product": "BOOK", "seats": "2"}
 			}
 		}
 	}`
@@ -165,15 +170,13 @@ func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 	if pending == nil {
 		t.Fatal("expected a queued row, got nil")
 	}
-	if pending.Product != "TRCR" || pending.Seats != 2 || pending.Email != "buyer@example.com" {
+	if pending.Product != "BOOK" || pending.Seats != 2 || pending.Email != "buyer@example.com" {
 		t.Fatalf("unexpected queued request: %+v", pending)
 	}
 }
 
 func TestWebhookRejectsBadSignature(t *testing.T) {
-	s, _ := store.Open(":memory:")
-	defer s.Close()
-
+	s := testQueueStore(t)
 	api := &stripeAPI{st: s, secret: "whsec_test"}
 	body := `{"type":"checkout.session.completed"}`
 
@@ -185,5 +188,42 @@ func TestWebhookRejectsBadSignature(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for bad signature, got %d", w.Code)
+	}
+}
+
+func TestWebhookRejectsSeatsOverMax(t *testing.T) {
+	s := testQueueStore(t)
+	api := &stripeAPI{st: s, secret: "whsec_test"}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_toomanyseats",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				},
+				"metadata": {"product": "BOOK", "seats": "500"}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (acknowledged, not enqueued), got %d", w.Code)
+	}
+
+	pending, err := s.NextPending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != nil {
+		t.Fatalf("over-max-seats checkout should not enqueue, got %+v", pending)
 	}
 }

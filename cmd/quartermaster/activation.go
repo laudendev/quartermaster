@@ -8,13 +8,13 @@ import (
 	"log"
 	"net/http"
 
+	"quartermaster/activations"
 	"quartermaster/license"
-	"quartermaster/store"
 )
 
 type activationAPI struct {
-	st  *store.Store
-	pub ed25519.PublicKey
+	st   *activations.Store
+	pubs []ed25519.PublicKey
 }
 
 func (a *activationAPI) activate(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +28,7 @@ func (a *activationAPI) activate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, err := license.Verify(a.pub, body.LicenseKey)
+	l, err := license.VerifyAny(a.pubs, body.LicenseKey)
 	if err != nil {
 		log.Println("activate: invalid license key:", err)
 		http.Error(w, "invalid license", http.StatusUnauthorized)
@@ -95,7 +95,7 @@ func (a *activationAPI) deactivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, err := license.Verify(a.pub, body.LicenseKey)
+	l, err := license.VerifyAny(a.pubs, body.LicenseKey)
 	if err != nil {
 		log.Println("deactivate: invalid license key:", err)
 		http.Error(w, "invalid license", http.StatusUnauthorized)

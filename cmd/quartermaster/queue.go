@@ -2,15 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
-	"log"
 
-	"quartermaster/store"
+	"quartermaster/queue"
 )
 
 type queueAPI struct {
-	st *store.Store
+	st *queue.Store
 }
 
 func (q *queueAPI) wait(w http.ResponseWriter, r *http.Request) {
@@ -20,12 +20,13 @@ func (q *queueAPI) wait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req == nil {
-		w.WriteHeader(http.StatusNoContent) // 204: empty queue, poll again
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(req)
 }
+
 func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID         string `json:"id"`
@@ -64,11 +65,10 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 	log.Println("queue complete: signed", body.ID)
 	if email != "" {
 		if err := sendLicenseEmail(email, body.LicenseKey); err != nil {
-			log.Println("email send failed:", err) // logged, not fatal to the request
+			log.Println("email send failed:", err)
 		} else {
 			log.Println("email sent:", email)
 		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
-

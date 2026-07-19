@@ -1,25 +1,32 @@
-package store
+package queue
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { db.Close() })
+	s, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
 func TestEnqueueAndNextPending(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_1", "TRCR", "buyer@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_1", "BOOK", "buyer@example.com", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -30,7 +37,7 @@ func TestEnqueueAndNextPending(t *testing.T) {
 	if req == nil {
 		t.Fatal("expected a pending request, got nil")
 	}
-	if req.Product != "TRCR" || req.Email != "buyer@example.com" || req.Seats != 1 {
+	if req.Product != "BOOK" || req.Email != "buyer@example.com" || req.Seats != 1 {
 		t.Fatalf("unexpected request: %+v", req)
 	}
 }
@@ -38,11 +45,10 @@ func TestEnqueueAndNextPending(t *testing.T) {
 func TestEnqueueIdempotent(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_dup", "TRCR", "a@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_dup", "BOOK", "a@example.com", 1); err != nil {
 		t.Fatal(err)
 	}
-	// Same paddle_txn again — must not error, must not create a second row.
-	if err := s.Enqueue("txn_dup", "TRCR", "a@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_dup", "BOOK", "a@example.com", 1); err != nil {
 		t.Fatalf("second enqueue with same txn should be absorbed, got: %v", err)
 	}
 
@@ -69,7 +75,7 @@ func TestNextPendingEmptyQueue(t *testing.T) {
 
 func TestCompleteTransitionsStatus(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_complete", "TRCR", "buyer@example.com", 1)
+	s.Enqueue("txn_complete", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	email, err := s.Complete(req.ID, "FAKE-KEY-123")
@@ -80,7 +86,6 @@ func TestCompleteTransitionsStatus(t *testing.T) {
 		t.Fatalf("expected email returned, got %q", email)
 	}
 
-	// Signed rows must not be returned by NextPending again.
 	again, err := s.NextPending()
 	if err != nil {
 		t.Fatal(err)
@@ -92,14 +97,12 @@ func TestCompleteTransitionsStatus(t *testing.T) {
 
 func TestCompleteIsIdempotent(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_dup_complete", "TRCR", "buyer@example.com", 1)
+	s.Enqueue("txn_dup_complete", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	if _, err := s.Complete(req.ID, "FIRST-KEY"); err != nil {
 		t.Fatal(err)
 	}
-	// Second Complete call on an already-signed row: guarded by the
-	// WHERE status='pending' clause — should succeed but do nothing.
 	email, err := s.Complete(req.ID, "SECOND-KEY")
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +114,7 @@ func TestCompleteIsIdempotent(t *testing.T) {
 
 func TestRejectTransitionsStatus(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_reject", "TRCR", "buyer@example.com", 1)
+	s.Enqueue("txn_reject", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	if err := s.Reject(req.ID, "invalid product code"); err != nil {
@@ -129,7 +132,7 @@ func TestRejectTransitionsStatus(t *testing.T) {
 
 func TestWaitPendingReturnsExistingWork(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_wait", "TRCR", "buyer@example.com", 1)
+	s.Enqueue("txn_wait", "BOOK", "buyer@example.com", 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -180,72 +183,5 @@ func TestWaitPendingRespectsCancellation(t *testing.T) {
 	}
 	if elapsed > 1*time.Second {
 		t.Fatalf("took too long to respect cancellation: %v", elapsed)
-	}
-}
-
-
-func TestActivateAndCount(t *testing.T) {
-	s := testStore(t)
-
-	if err := s.Activate("act1", "lic1", "fingerprint-a"); err != nil {
-		t.Fatal(err)
-	}
-	count, err := s.CountActivations("lic1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 activation, got %d", count)
-	}
-}
-
-func TestActivateSameFingerprintIdempotent(t *testing.T) {
-	s := testStore(t)
-
-	s.Activate("act1", "lic1", "fingerprint-a")
-	if err := s.Activate("act2", "lic1", "fingerprint-a"); err != nil {
-		t.Fatalf("re-activating same fingerprint should be idempotent, got: %v", err)
-	}
-
-	count, _ := s.CountActivations("lic1")
-	if count != 1 {
-		t.Fatalf("expected still 1 activation, got %d", count)
-	}
-}
-
-func TestActivateDifferentFingerprintsCountSeparately(t *testing.T) {
-	s := testStore(t)
-
-	s.Activate("act1", "lic1", "fingerprint-a")
-	s.Activate("act2", "lic1", "fingerprint-b")
-
-	count, _ := s.CountActivations("lic1")
-	if count != 2 {
-		t.Fatalf("expected 2 activations, got %d", count)
-	}
-}
-
-func TestDeactivateFreesSlot(t *testing.T) {
-	s := testStore(t)
-
-	s.Activate("act1", "lic1", "fingerprint-a")
-	if err := s.Deactivate("lic1", "fingerprint-a"); err != nil {
-		t.Fatal(err)
-	}
-
-	count, _ := s.CountActivations("lic1")
-	if count != 0 {
-		t.Fatalf("expected 0 activations after deactivate, got %d", count)
-	}
-}
-
-func TestIsRevokedFalseByDefault(t *testing.T) {
-	s := testStore(t)
-	revoked, err := s.IsRevoked("lic_never_seen")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revoked {
-		t.Fatal("expected false for a license with no revocation record")
 	}
 }

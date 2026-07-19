@@ -29,4 +29,4 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("wrote signing.key (0600) and signing.pub")
-}// signing.key is the crown jewels: offline storage only, never the VPS.
+} // signing.key is the crown jewels: offline storage only, never the VPS.

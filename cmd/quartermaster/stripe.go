@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"quartermaster/store"
+	"quartermaster/queue"
 )
 
 type stripeAPI struct {
-	st     *store.Store
+	st     *queue.Store
 	secret string // whsec_... from `stripe listen` or the dashboard
 }
 
@@ -56,7 +56,7 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 
 	var evt stripeEvent
 	if err := json.Unmarshal(body, &evt); err != nil {
-                log.Println("stripe webhook: failed to parse payload:", err)
+		log.Println("stripe webhook: failed to parse payload:", err)
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
@@ -72,9 +72,9 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 		// Out of the market we're registered to sell in. Acknowledge the
 		// webhook so Stripe doesn't retry, but never enqueue.
 		log.Println("stripe webhook: rejecting non-US checkout, session",
-		            obj.ID,
-			    "country",
-			    obj.CustomerDetails.Address.Country)
+			obj.ID,
+			"country",
+			obj.CustomerDetails.Address.Country)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -83,8 +83,16 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 	if seats <= 0 {
 		seats = 1
 	}
+	const maxSeats = 24
+	if seats > maxSeats {
+		log.Println("stripe webhook: rejecting session", obj.ID,
+			"- seats", seats, "exceeds maximum of", maxSeats,
+			"metadata likely malformed or tampered")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-	if err := s.st.Enqueue(obj.ID, obj.Metadata.Product, obj.CustomerDetails.Email, seats); err != nil {    
+	if err := s.st.Enqueue(obj.ID, obj.Metadata.Product, obj.CustomerDetails.Email, seats); err != nil {
 		log.Println("stripe webhook: enqueue failed for session", obj.ID, ":", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -92,7 +100,6 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("stripe webhook: enqueued session", obj.ID, "product", obj.Metadata.Product, "email", obj.CustomerDetails.Email)
 	w.WriteHeader(http.StatusOK)
 }
-
 
 // verifySignature implements Stripe's webhook signature scheme:
 // header is "t=<timestamp>,v1=<hmac>[,v1=<hmac>...]"
