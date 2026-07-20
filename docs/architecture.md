@@ -76,7 +76,7 @@ rather than merely unlikely.
 
 ## Data flow: a purchase, end to end
 
-![Quartermaster purchase flow](purchase-flow-diagram.png)
+![Quartermaster purchase flow](purchase-flow-diagram.svg)
 
 1. Customer completes Stripe Checkout.
 2. Stripe sends `checkout.session.completed` to
