@@ -54,7 +54,7 @@ Verification is multi-key by design from the start, so the signing
 key can be rotated in the future without ever invalidating a license
 already sold.
 
-<img src="docs/quartermaster_component_architecture.svg" alt="Quartermaster component architecture" width="850">
+<img src="docs/quartermaster_component_architecture.svg" alt="Quartermaster component architecture" width="800">
 
 ## How licensing actually treats the customer
 
