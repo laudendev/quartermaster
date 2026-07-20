@@ -59,7 +59,7 @@ initiates a connection, the private key itself never crosses the
 wire in either direction — it is generated once, on the signer
 machine, by `cmd/keygen`, and stays there.
 
-![Quartermaster component architecture](architecture-diagram.svg)
+![Quartermaster component architecture](quartermaster_component_architecture.svg)
 
 ## Why the split exists
 
@@ -76,7 +76,7 @@ rather than merely unlikely.
 
 ## Data flow: a purchase, end to end
 
-![Quartermaster purchase flow](purchase-flow-diagram.svg)
+![Quartermaster purchase flow](quartermaster_purchase_flow.svg)
 
 1. Customer completes Stripe Checkout.
 2. Stripe sends `checkout.session.completed` to
