@@ -192,7 +192,7 @@ func buildReceiptHTML(productName, amountLine, purchaseDate, licenseKey string) 
 					<tr>
 						<td style="padding:24px 32px 32px;">
 							<p style="color:#6B7280;font-size:13px;margin:0;">Questions? Just reply to this email — a real person (me) will get it.</p>
-							<p style="color:#9CA3AF;font-size:12px;margin:16px 0 0;">— Tyler L. Laudenslager, lauden.dev</p>
+							<p style="color:#9CA3AF;font-size:12px;margin:16px 0 0;">&copy 2026 Laudenslager Software, LLC. All rights reserved.</p>
 						</td>
 					</tr>
 				</table>
