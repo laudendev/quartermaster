@@ -17,6 +17,8 @@ selling — a product is just a short, exactly-4-character code
 (`BOOK`, etc.) attached to a Stripe Price. Adding a new product to
 sell is a config change, not new architecture.
 
+
+
 ## The two programs
 
 ### quartermaster (`cmd/quartermaster`)
@@ -57,6 +59,8 @@ initiates a connection, the private key itself never crosses the
 wire in either direction — it is generated once, on the signer
 machine, by `cmd/keygen`, and stays there.
 
+![Quartermaster component architecture](quartermaster_component_architecture.svg)
+
 ## Why the split exists
 
 This is the core security property of the whole system: **the
@@ -71,6 +75,8 @@ between them) for making that failure mode structurally impossible
 rather than merely unlikely.
 
 ## Data flow: a purchase, end to end
+
+![Quartermaster purchase flow](quartermaster_purchase_flow.svg)
 
 1. Customer completes Stripe Checkout.
 2. Stripe sends `checkout.session.completed` to
