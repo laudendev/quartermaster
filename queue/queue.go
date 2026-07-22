@@ -26,9 +26,12 @@ CREATE TABLE IF NOT EXISTS sign_requests (
     license_key  TEXT,
     reject_note  TEXT,
     created_at   INTEGER NOT NULL,
-    signed_at    INTEGER
+    signed_at    INTEGER,
+	email_sent   INTEGER NOT NULL DEFAULT 0,
+	email_attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_status ON sign_requests(status);
+CREATE INDEX IF NOT EXISTS idx_email_pending ON sign_requests(status, email_sent);
 `
 
 func Open(db *sql.DB) (*Store, error) {
@@ -101,6 +104,56 @@ func (s *Store) Complete(id, licenseKey string) (string, string, error) {
 		return "", "", err
 	}
 	return email, txnID, nil
+}
+
+// UnsentEmail represents a signed request whose license email hasn't
+// been successfully delivered yet.
+type UnsentEmail struct {
+	ID          string
+	TxnID       string
+	Email       string
+	LicenseKey  string
+	Attempts    int
+}
+
+// PendingEmails returns signed requests that still need their license
+// email sent (or resent, after a prior failed attempt).
+func (s *Store) PendingEmails(maxAttempts int) ([]UnsentEmail, error) {
+	rows, err := s.db.Query(
+		`SELECT id, txn_id, email, license_key, email_attempts
+		 FROM sign_requests
+		 WHERE status = 'signed' AND email_sent = 0 AND email_attempts < ?
+		 ORDER BY signed_at`,
+		maxAttempts,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []UnsentEmail
+	for rows.Next() {
+		var u UnsentEmail
+		if err := rows.Scan(&u.ID, &u.TxnID, &u.Email, &u.LicenseKey, &u.Attempts); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// MarkEmailSent records that the license email for this request was
+// successfully delivered.
+func (s *Store) MarkEmailSent(id string) error {
+	_, err := s.db.Exec(`UPDATE sign_requests SET email_sent = 1 WHERE id = ?`, id)
+	return err
+}
+
+// RecordEmailAttempt increments the retry counter after a failed send,
+// without marking the email as sent.
+func (s *Store) RecordEmailAttempt(id string) error {
+	_, err := s.db.Exec(`UPDATE sign_requests SET email_attempts = email_attempts + 1 WHERE id = ?`, id)
+	return err
 }
 
 func (s *Store) Reject(id, note string) error {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -89,6 +90,8 @@ func main() {
 		log.Println("webhook server on", webhookSrv.Addr)
 		log.Fatal(webhookSrv.ListenAndServe())
 	}()
+
+	go runEmailRetryLoop(q, 5*time.Minute)
 
 	log.Println("queue API on", queueSrv.Addr)
 	log.Fatal(queueSrv.ListenAndServe())

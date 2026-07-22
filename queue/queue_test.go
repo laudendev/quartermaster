@@ -185,3 +185,125 @@ func TestWaitPendingRespectsCancellation(t *testing.T) {
 		t.Fatalf("took too long to respect cancellation: %v", elapsed)
 	}
 }
+
+
+
+func TestPendingEmailsFindsUnsent(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_1", "PROD", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	req, err := s.NextPending()
+	if err != nil || req == nil {
+		t.Fatalf("expected a pending request, got %v, err %v", req, err)
+	}
+	if _, _, err := s.Complete(req.ID, "LICENSE-KEY-123"); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	pending, err := s.PendingEmails(5)
+	if err != nil {
+		t.Fatalf("PendingEmails failed: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending email, got %d", len(pending))
+	}
+	if pending[0].Email != "buyer@example.com" {
+		t.Errorf("expected buyer@example.com, got %q", pending[0].Email)
+	}
+	if pending[0].TxnID != "txn_1" {
+		t.Errorf("expected txn_1, got %q", pending[0].TxnID)
+	}
+}
+
+func TestMarkEmailSentExcludesFromPending(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_2", "PROD", "buyer2@example.com", 1); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	req, _ := s.NextPending()
+	if _, _, err := s.Complete(req.ID, "LICENSE-KEY-456"); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	if err := s.MarkEmailSent(req.ID); err != nil {
+		t.Fatalf("MarkEmailSent failed: %v", err)
+	}
+
+	pending, err := s.PendingEmails(5)
+	if err != nil {
+		t.Fatalf("PendingEmails failed: %v", err)
+	}
+	for _, p := range pending {
+		if p.ID == req.ID {
+			t.Errorf("expected request %s to be excluded after MarkEmailSent, but it was still pending", req.ID)
+		}
+	}
+}
+
+func TestRecordEmailAttemptIncrementsCounter(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_3", "PROD", "buyer3@example.com", 1); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	req, _ := s.NextPending()
+	if _, _, err := s.Complete(req.ID, "LICENSE-KEY-789"); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	if err := s.RecordEmailAttempt(req.ID); err != nil {
+		t.Fatalf("RecordEmailAttempt failed: %v", err)
+	}
+	if err := s.RecordEmailAttempt(req.ID); err != nil {
+		t.Fatalf("RecordEmailAttempt failed: %v", err)
+	}
+
+	pending, err := s.PendingEmails(5)
+	if err != nil {
+		t.Fatalf("PendingEmails failed: %v", err)
+	}
+	var found bool
+	for _, p := range pending {
+		if p.ID == req.ID {
+			found = true
+			if p.Attempts != 2 {
+				t.Errorf("expected 2 attempts recorded, got %d", p.Attempts)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected request %s to still be pending after 2 failed attempts", req.ID)
+	}
+}
+
+func TestPendingEmailsRespectsMaxAttempts(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_4", "PROD", "buyer4@example.com", 1); err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	req, _ := s.NextPending()
+	if _, _, err := s.Complete(req.ID, "LICENSE-KEY-999"); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	// Exceed the retry cap.
+	for i := 0; i < 5; i++ {
+		if err := s.RecordEmailAttempt(req.ID); err != nil {
+			t.Fatalf("RecordEmailAttempt failed: %v", err)
+		}
+	}
+
+	pending, err := s.PendingEmails(5)
+	if err != nil {
+		t.Fatalf("PendingEmails failed: %v", err)
+	}
+	for _, p := range pending {
+		if p.ID == req.ID {
+			t.Errorf("expected request %s to be excluded once attempts reach the cap, but it was still pending", req.ID)
+		}
+	}
+}
