@@ -56,7 +56,7 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, err := q.st.Complete(body.ID, body.LicenseKey)
+	email, txnID, err := q.st.Complete(body.ID, body.LicenseKey)
 	if err != nil {
 		log.Println("queue complete: store update failed for", body.ID, ":", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -64,7 +64,7 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("queue complete: signed", body.ID)
 	if email != "" {
-		if err := sendLicenseEmail(body.ID, email, body.LicenseKey); err != nil {
+		if err := sendLicenseEmail(txnID, email, body.LicenseKey); err != nil {
 			log.Println("email send failed:", err)
 		} else {
 			log.Println("email sent:", email)

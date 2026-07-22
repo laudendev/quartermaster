@@ -82,25 +82,25 @@ func (s *Store) NextPending() (*SignRequest, error) {
 	return &r, nil
 }
 
-func (s *Store) Complete(id, licenseKey string) (string, error) {
+func (s *Store) Complete(id, licenseKey string) (string, string, error) {
 	res, err := s.db.Exec(
 		`UPDATE sign_requests SET status = 'signed', license_key = ?, signed_at = ?
 		 WHERE id = ? AND status = 'pending'`,
 		licenseKey, time.Now().Unix(), id)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	n, err := res.RowsAffected()
 	if err != nil || n == 0 {
-		return "", err
+		return "", "", err
 	}
 
-	var email string
-	row := s.db.QueryRow(`SELECT email FROM sign_requests WHERE id = ?`, id)
-	if err := row.Scan(&email); err != nil {
-		return "", err
+	var email, txnID string
+	row := s.db.QueryRow(`SELECT email, txn_id FROM sign_requests WHERE id = ?`, id)
+	if err := row.Scan(&email, &txnID); err != nil {
+		return "", "", err
 	}
-	return email, nil
+	return email, txnID, nil
 }
 
 func (s *Store) Reject(id, note string) error {

@@ -78,7 +78,7 @@ func TestCompleteTransitionsStatus(t *testing.T) {
 	s.Enqueue("txn_complete", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
-	email, err := s.Complete(req.ID, "FAKE-KEY-123")
+	email, _, err := s.Complete(req.ID, "FAKE-KEY-123")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,10 +100,10 @@ func TestCompleteIsIdempotent(t *testing.T) {
 	s.Enqueue("txn_dup_complete", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
-	if _, err := s.Complete(req.ID, "FIRST-KEY"); err != nil {
+	if _, _, err := s.Complete(req.ID, "FIRST-KEY"); err != nil {
 		t.Fatal(err)
 	}
-	email, err := s.Complete(req.ID, "SECOND-KEY")
+	email, _, err := s.Complete(req.ID, "SECOND-KEY")
 	if err != nil {
 		t.Fatal(err)
 	}
