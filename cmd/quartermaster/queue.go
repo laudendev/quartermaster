@@ -64,7 +64,7 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("queue complete: signed", body.ID)
 	if email != "" {
-		if err := sendLicenseEmail(email, body.LicenseKey); err != nil {
+		if err := sendLicenseEmail(body.ID, email, body.LicenseKey); err != nil {
 			log.Println("email send failed:", err)
 		} else {
 			log.Println("email sent:", email)
