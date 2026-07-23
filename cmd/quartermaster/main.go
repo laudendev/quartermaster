@@ -74,8 +74,12 @@ func main() {
 
 	webhookMux := http.NewServeMux()
 	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
-	webhookMux.HandleFunc("POST /license/activate", aa.activate)
+	webhookMux.HandleFunc("POST /license/download", aa.download)
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
+
+	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
+	       http.ServeFile(w, r, "/opt/quartermaster/public/launcher")
+	})
 
 	queueSrv := &http.Server{
 		Addr:    "10.46.0.1:9090",
