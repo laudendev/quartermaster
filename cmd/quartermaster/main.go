@@ -78,7 +78,8 @@ func main() {
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
-	       http.ServeFile(w, r, "/opt/quartermaster/public/launcher")
+		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher")
+		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher")
 	})
 
 	queueSrv := &http.Server{
