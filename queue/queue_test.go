@@ -186,8 +186,6 @@ func TestWaitPendingRespectsCancellation(t *testing.T) {
 	}
 }
 
-
-
 func TestPendingEmailsFindsUnsent(t *testing.T) {
 	s := testStore(t)
 

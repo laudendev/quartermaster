@@ -109,11 +109,11 @@ func (s *Store) Complete(id, licenseKey string) (string, string, error) {
 // UnsentEmail represents a signed request whose license email hasn't
 // been successfully delivered yet.
 type UnsentEmail struct {
-	ID          string
-	TxnID       string
-	Email       string
-	LicenseKey  string
-	Attempts    int
+	ID         string
+	TxnID      string
+	Email      string
+	LicenseKey string
+	Attempts   int
 }
 
 // PendingEmails returns signed requests that still need their license
