@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,9 +16,39 @@ import (
 	"quartermaster/queue"
 )
 
+// lineItemFetcher retrieves the finalized line items for a completed
+// Checkout Session. Abstracted so tests can supply a fake instead of
+// hitting Stripe's real API.
+type lineItemFetcher interface {
+	fetchLineItems(sessionID string) ([]stripeLineItem, error)
+}
+
+// productResolver translates a Stripe Price ID into softstore's product
+// code. Abstracted so tests can supply a fake instead of calling
+// softstore's real internal API over the network.
+type productResolver interface {
+	resolveProductCode(priceID string) (string, error)
+}
+
 type stripeAPI struct {
 	st     *queue.Store
 	secret string // whsec_... from `stripe listen` or the dashboard
+
+	lineItems lineItemFetcher
+	products  productResolver
+}
+
+// realStripeClient is the production implementation of lineItemFetcher,
+// calling Stripe's API directly.
+type realStripeClient struct {
+	stripeSecretKey string
+}
+
+// realSoftstoreClient is the production implementation of productResolver,
+// calling softstore's internal API directly.
+type realSoftstoreClient struct {
+	baseURL     string
+	internalKey string
 }
 
 // stripeEvent is the minimal shape we need from checkout.session.completed.
@@ -38,6 +69,78 @@ type stripeEvent struct {
 			} `json:"metadata"`
 		} `json:"object"`
 	} `json:"data"`
+}
+
+// stripeLineItem is one entry from a Checkout Session's line_items list.
+type stripeLineItem struct {
+	Quantity int64 `json:"quantity"`
+	Price    struct {
+		ID string `json:"id"`
+	} `json:"price"`
+}
+
+type stripeLineItemsResponse struct {
+	Data []stripeLineItem `json:"data"`
+}
+
+// fetchLineItems retrieves the finalized line items (price + quantity)
+// for a completed Checkout Session, used to determine exactly what was
+// purchased for fulfillment — the webhook payload itself only ever
+// carries minimal, non-expandable fields.
+func (c *realStripeClient) fetchLineItems(sessionID string) ([]stripeLineItem, error) {
+	url := fmt.Sprintf("https://api.stripe.com/v1/checkout/sessions/%s/line_items?limit=100", sessionID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build stripe line items request: %w", err)
+	}
+	req.SetBasicAuth(c.stripeSecretKey, "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("stripe line items fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("stripe line items fetch: unexpected status %d", resp.StatusCode)
+	}
+
+	var parsed stripeLineItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode stripe line items: %w", err)
+	}
+	return parsed.Data, nil
+}
+
+// productCodeResponse mirrors softstore's internal lookup response shape.
+type productCodeResponse struct {
+	ProductCode string `json:"product_code"`
+}
+
+// resolveProductCode calls softstore's internal API to translate a Stripe
+// Price ID (from a completed checkout's line items) into the product
+// code Quartermaster uses for licensing and file delivery.
+func (c *realSoftstoreClient) resolveProductCode(priceID string) (string, error) {
+	url := fmt.Sprintf("%s/internal/products/by-price/%s", c.baseURL, priceID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build softstore lookup request: %w", err)
+	}
+	req.Header.Set("X-Internal-Secret", c.internalKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("softstore lookup: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("softstore lookup: unexpected status %d for price %s", resp.StatusCode, priceID)
+	}
+
+	var parsed productCodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", fmt.Errorf("decode softstore lookup response: %w", err)
+	}
+	return parsed.ProductCode, nil
 }
 
 func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
@@ -79,25 +182,46 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	seats, _ := strconv.Atoi(obj.Metadata.Seats)
-	if seats <= 0 {
-		seats = 1
+	lineItems, err := s.lineItems.fetchLineItems(obj.ID)
+	if err != nil {
+		log.Println("stripe webhook: fetch line items failed for session", obj.ID, ":", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-	const maxSeats = 24
-	if seats > maxSeats {
+
+	const maxUnitsPerSession = 24
+	var totalUnits int64
+	for _, li := range lineItems {
+		totalUnits += li.Quantity
+	}
+	if totalUnits > maxUnitsPerSession {
 		log.Println("stripe webhook: rejecting session", obj.ID,
-			"- seats", seats, "exceeds maximum of", maxSeats,
-			"metadata likely malformed or tampered")
+			"- total units", totalUnits, "exceeds maximum of", maxUnitsPerSession)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	if err := s.st.Enqueue(obj.ID, obj.Metadata.Product, obj.CustomerDetails.Email, seats); err != nil {
-		log.Println("stripe webhook: enqueue failed for session", obj.ID, ":", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	unitIndex := 0
+	for _, li := range lineItems {
+		productCode, err := s.products.resolveProductCode(li.Price.ID)
+		if err != nil {
+			log.Println("stripe webhook: resolve product code failed for session", obj.ID,
+				"price", li.Price.ID, ":", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		for i := int64(0); i < li.Quantity; i++ {
+			txnID := fmt.Sprintf("%s#%d", obj.ID, unitIndex)
+			if err := s.st.Enqueue(txnID, productCode, obj.CustomerDetails.Email, 1); err != nil {
+				log.Println("stripe webhook: enqueue failed for", txnID, ":", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			log.Println("stripe webhook: enqueued", txnID, "product", productCode, "email", obj.CustomerDetails.Email)
+			unitIndex++
+		}
 	}
-	log.Println("stripe webhook: enqueued session", obj.ID, "product", obj.Metadata.Product, "email", obj.CustomerDetails.Email)
 	w.WriteHeader(http.StatusOK)
 }
 

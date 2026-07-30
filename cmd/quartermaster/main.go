@@ -63,7 +63,17 @@ func main() {
 	queueMux.HandleFunc("GET /queue/wait", qa.wait)
 	queueMux.HandleFunc("POST /queue/complete", qa.complete)
 
-	sa := &stripeAPI{st: q, secret: requireEnv("STRIPE_WEBHOOK_SECRET")}
+	sa := &stripeAPI{
+		st:     q,
+		secret: requireEnv("STRIPE_WEBHOOK_SECRET"),
+		lineItems: &realStripeClient{
+			stripeSecretKey: requireEnv("STRIPE_SECRET_KEY"),
+		},
+		products: &realSoftstoreClient{
+			baseURL:     requireEnv("SOFTSTORE_BASE_URL"),
+			internalKey: requireEnv("SOFTSTORE_INTERNAL_SECRET"),
+		},
+	}
 
 	pub, err := loadPublicKey("signing.pub")
 	if err != nil {
@@ -76,6 +86,7 @@ func main() {
 	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
 	webhookMux.HandleFunc("POST /license/download", aa.download)
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
+	webhookMux.HandleFunc("POST /license/activate", aa.activate)
 
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher")

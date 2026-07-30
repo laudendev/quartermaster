@@ -32,6 +32,36 @@ func testQueueStore(t *testing.T) *queue.Store {
 	return s
 }
 
+// fakeLineItems is a test double for lineItemFetcher.
+type fakeLineItems struct {
+	items map[string][]stripeLineItem // sessionID -> items
+	err   error
+}
+
+func (f *fakeLineItems) fetchLineItems(sessionID string) ([]stripeLineItem, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.items[sessionID], nil
+}
+
+// fakeProducts is a test double for productResolver.
+type fakeProducts struct {
+	codes map[string]string // priceID -> productCode
+	err   error
+}
+
+func (f *fakeProducts) resolveProductCode(priceID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	code, ok := f.codes[priceID]
+	if !ok {
+		return "", fmt.Errorf("no product code mapped for price %s", priceID)
+	}
+	return code, nil
+}
+
 func signPayload(secret, body string, timestamp int64) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(fmt.Sprintf("%d.%s", timestamp, body)))
@@ -100,8 +130,7 @@ func TestVerifySignatureMalformedHeader(t *testing.T) {
 
 func TestWebhookRejectsNonUSCountry(t *testing.T) {
 	s := testQueueStore(t)
-	api := &stripeAPI{st: s, secret: "whsec_test"}
-
+	api := &stripeAPI{st: s, secret: "whsec_test", lineItems: &fakeLineItems{}, products: &fakeProducts{}}
 	body := `{
 		"type": "checkout.session.completed",
 		"data": {
@@ -137,7 +166,22 @@ func TestWebhookRejectsNonUSCountry(t *testing.T) {
 
 func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 	s := testQueueStore(t)
-	api := &stripeAPI{st: s, secret: "whsec_test"}
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_us": {
+					{Quantity: 2, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_book": "BOOK"},
+		},
+	}
 
 	body := `{
 		"type": "checkout.session.completed",
@@ -147,8 +191,7 @@ func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
-				},
-				"metadata": {"product": "BOOK", "seats": "2"}
+				}
 			}
 		}
 	}`
@@ -163,21 +206,24 @@ func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	pending, err := s.NextPending()
+	// Quantity 2 of one product should enqueue 2 separate single-seat requests.
+	first, err := s.NextPending()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending == nil {
-		t.Fatal("expected a queued row, got nil")
+	if first == nil {
+		t.Fatal("expected a first queued row, got nil")
 	}
-	if pending.Product != "BOOK" || pending.Seats != 2 || pending.Email != "buyer@example.com" {
-		t.Fatalf("unexpected queued request: %+v", pending)
+	if first.Product != "BOOK" || first.Seats != 1 || first.Email != "buyer@example.com" {
+		t.Fatalf("unexpected first queued request: %+v", first)
 	}
 }
 
 func TestWebhookRejectsBadSignature(t *testing.T) {
+
 	s := testQueueStore(t)
-	api := &stripeAPI{st: s, secret: "whsec_test"}
+	api := &stripeAPI{st: s, secret: "whsec_test", lineItems: &fakeLineItems{}, products: &fakeProducts{}}
+
 	body := `{"type":"checkout.session.completed"}`
 
 	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
@@ -193,7 +239,22 @@ func TestWebhookRejectsBadSignature(t *testing.T) {
 
 func TestWebhookRejectsSeatsOverMax(t *testing.T) {
 	s := testQueueStore(t)
-	api := &stripeAPI{st: s, secret: "whsec_test"}
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_toomanyseats": {
+					{Quantity: 500, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_book": "BOOK"},
+		},
+	}
 
 	body := `{
 		"type": "checkout.session.completed",
@@ -203,8 +264,7 @@ func TestWebhookRejectsSeatsOverMax(t *testing.T) {
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
-				},
-				"metadata": {"product": "BOOK", "seats": "500"}
+				}
 			}
 		}
 	}`
@@ -224,6 +284,79 @@ func TestWebhookRejectsSeatsOverMax(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pending != nil {
-		t.Fatalf("over-max-seats checkout should not enqueue, got %+v", pending)
+		t.Fatalf("over-max-units checkout should not enqueue, got %+v", pending)
+	}
+}
+
+func TestWebhookEnqueuesMultipleDistinctProducts(t *testing.T) {
+	s := testQueueStore(t)
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_cart": {
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_widget"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{
+				"price_book":   "BOOK",
+				"price_widget": "TWDG",
+			},
+		},
+	}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_cart",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var products []string
+	for {
+		pending, err := s.NextPending()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pending == nil {
+			break
+		}
+		products = append(products, pending.Product)
+
+		if _, _, err := s.Complete(pending.ID, "dummy-key-"+pending.Product); err != nil {
+			t.Fatalf("failed to drain queue via Complete: %v", err)
+		}
+	}
+
+	if len(products) != 2 {
+		t.Fatalf("expected 2 queued requests for 2 distinct products, got %d: %v", len(products), products)
+	}
+	seen := map[string]bool{products[0]: true, products[1]: true}
+	if !seen["BOOK"] || !seen["TWDG"] {
+		t.Errorf("expected products BOOK and TWDG, got %v", products)
 	}
 }
