@@ -63,16 +63,19 @@ func main() {
 	queueMux.HandleFunc("GET /queue/wait", qa.wait)
 	queueMux.HandleFunc("POST /queue/complete", qa.complete)
 
+	softstoreClient := &realSoftstoreClient{
+		baseURL:     requireEnv("SOFTSTORE_BASE_URL"),
+		internalKey: requireEnv("SOFTSTORE_INTERNAL_SECRET"),
+	}
+
 	sa := &stripeAPI{
 		st:     q,
 		secret: requireEnv("STRIPE_WEBHOOK_SECRET"),
 		lineItems: &realStripeClient{
 			stripeSecretKey: requireEnv("STRIPE_SECRET_KEY"),
 		},
-		products: &realSoftstoreClient{
-			baseURL:     requireEnv("SOFTSTORE_BASE_URL"),
-			internalKey: requireEnv("SOFTSTORE_INTERNAL_SECRET"),
-		},
+		products: softstoreClient,
+		carts:    softstoreClient,
 	}
 
 	pub, err := loadPublicKey("signing.pub")

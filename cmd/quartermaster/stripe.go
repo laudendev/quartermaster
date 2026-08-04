@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -30,12 +31,20 @@ type productResolver interface {
 	resolveProductCode(priceID string) (string, error)
 }
 
+// cartClearer empties a softstore cart after its purchase has been
+// fully fulfilled. Abstracted so tests can supply a fake instead of
+// calling softstore's real internal API over the network.
+type cartClearer interface {
+	clearCart(cartToken string) error
+}
+
 type stripeAPI struct {
 	st     *queue.Store
 	secret string // whsec_... from `stripe listen` or the dashboard
 
 	lineItems lineItemFetcher
 	products  productResolver
+	carts     cartClearer
 }
 
 // realStripeClient is the production implementation of lineItemFetcher,
@@ -64,8 +73,9 @@ type stripeEvent struct {
 				} `json:"address"`
 			} `json:"customer_details"`
 			Metadata struct {
-				Product string `json:"product"`
-				Seats   string `json:"seats"`
+				Product   string `json:"product"`
+				Seats     string `json:"seats"`
+				CartToken string `json:"cart_token"`
 			} `json:"metadata"`
 		} `json:"object"`
 	} `json:"data"`
@@ -141,6 +151,34 @@ func (c *realSoftstoreClient) resolveProductCode(priceID string) (string, error)
 		return "", fmt.Errorf("decode softstore lookup response: %w", err)
 	}
 	return parsed.ProductCode, nil
+}
+
+// clearCart calls softstore's internal API to empty a cart after its
+// purchase has been fully fulfilled.
+func (c *realSoftstoreClient) clearCart(cartToken string) error {
+	url := fmt.Sprintf("%s/internal/cart/clear", c.baseURL)
+	payload, err := json.Marshal(map[string]string{"cart_token": cartToken})
+	if err != nil {
+		return fmt.Errorf("marshal clear cart payload: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("build softstore clear cart request: %w", err)
+	}
+	req.Header.Set("X-Internal-Secret", c.internalKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("softstore clear cart: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("softstore clear cart: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +260,19 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 			unitIndex++
 		}
 	}
+
+	if obj.Metadata.CartToken != "" {
+		if err := s.carts.clearCart(obj.Metadata.CartToken); err != nil {
+			// Don't fail the whole webhook over this — fulfillment already
+			// succeeded, which is what actually matters to the customer.
+			// A cart that lingers a bit longer is a cosmetic issue, not
+			// a lost order.
+			log.Println("stripe webhook: clear cart failed for token", obj.Metadata.CartToken, ":", err)
+		} else {
+			log.Println("stripe webhook: cleared cart", obj.Metadata.CartToken)
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 

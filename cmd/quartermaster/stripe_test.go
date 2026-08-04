@@ -62,6 +62,20 @@ func (f *fakeProducts) resolveProductCode(priceID string) (string, error) {
 	return code, nil
 }
 
+// fakeCarts is a test double for cartClearer.
+type fakeCarts struct {
+	cleared []string
+	err     error
+}
+
+func (f *fakeCarts) clearCart(cartToken string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cleared = append(f.cleared, cartToken)
+	return nil
+}
+
 func signPayload(secret, body string, timestamp int64) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(fmt.Sprintf("%d.%s", timestamp, body)))
@@ -358,5 +372,156 @@ func TestWebhookEnqueuesMultipleDistinctProducts(t *testing.T) {
 	seen := map[string]bool{products[0]: true, products[1]: true}
 	if !seen["BOOK"] || !seen["TWDG"] {
 		t.Errorf("expected products BOOK and TWDG, got %v", products)
+	}
+}
+
+func TestWebhookClearsCartWhenTokenPresent(t *testing.T) {
+	s := testQueueStore(t)
+	carts := &fakeCarts{}
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_withcart": {
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_book": "BOOK"},
+		},
+		carts: carts,
+	}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_withcart",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				},
+				"metadata": {"cart_token": "cart-abc-123"}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(carts.cleared) != 1 || carts.cleared[0] != "cart-abc-123" {
+		t.Errorf("expected cart 'cart-abc-123' to be cleared, got %v", carts.cleared)
+	}
+}
+
+func TestWebhookSkipsCartClearWhenNoToken(t *testing.T) {
+	s := testQueueStore(t)
+	carts := &fakeCarts{}
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_nocart": {
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_book": "BOOK"},
+		},
+		carts: carts,
+	}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_nocart",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(carts.cleared) != 0 {
+		t.Errorf("expected no cart clear for single-item purchase without cart_token, got %v", carts.cleared)
+	}
+}
+
+func TestWebhookClearCartFailureDoesNotFailWebhook(t *testing.T) {
+	s := testQueueStore(t)
+	carts := &fakeCarts{err: fmt.Errorf("softstore unreachable")}
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_clearfails": {
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_book"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_book": "BOOK"},
+		},
+		carts: carts,
+	}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_clearfails",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				},
+				"metadata": {"cart_token": "cart-xyz"}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when cart clear fails (fulfillment already succeeded), got %d", w.Code)
+	}
+
+	pending, err := s.NextPending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending == nil {
+		t.Fatal("expected the license to still be enqueued despite cart clear failure")
 	}
 }
