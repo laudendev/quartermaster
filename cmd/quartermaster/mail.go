@@ -40,6 +40,7 @@ type stripeSessionDetails struct {
 		Data []struct {
 			Description string `json:"description"`
 			AmountTotal int64  `json:"amount_total"`
+			AmountTax   int64  `json:"amount_tax"`
 			Price       struct {
 				ID string `json:"id"`
 			} `json:"price"`
@@ -107,20 +108,42 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 
 	// Index Stripe's line items by exact Price ID for precise per-item
 	// matching — avoids any ambiguity from similar/duplicate descriptions.
-	amountByPriceID := make(map[string]string)
+	type lineItemInfo struct {
+		name       string
+		amountLine string
+	}
+	infoByPriceID := make(map[string]lineItemInfo)
+	var totalTaxCents int64
 	for _, li := range details.LineItems.Data {
-		amountByPriceID[li.Price.ID] = formatAmount(li.AmountTotal, details.Currency)
+		name := li.Description
+		if name == "" {
+			name = "Unnamed product"
+		}
+		infoByPriceID[li.Price.ID] = lineItemInfo{
+			name:       name,
+			amountLine: formatAmount(li.AmountTotal, details.Currency),
+		}
+		totalTaxCents += li.AmountTax
 	}
 
 	receiptItems := make([]receiptLineItem, 0, len(items))
 	for _, item := range items {
+		info := infoByPriceID[item.PriceID]
+		productName := info.name
+		if productName == "" {
+			productName = item.Product // fall back to the product code if Stripe lookup failed
+		}
 		receiptItems = append(receiptItems, receiptLineItem{
-			ProductName: item.Product,
-			AmountLine:  amountByPriceID[item.PriceID],
+			ProductName: productName,
+			AmountLine:  info.amountLine,
 			LicenseKey:  item.LicenseKey,
 		})
 	}
 
+	taxLine := ""
+	if totalTaxCents > 0 {
+		taxLine = formatAmount(totalTaxCents, details.Currency)
+	}
 	totalLine := ""
 	if details.AmountTotal > 0 {
 		totalLine = formatAmount(details.AmountTotal, details.Currency)
@@ -138,8 +161,8 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 		To:      []string{to},
 		ReplyTo: "tlauden@duck.com", // your real inbox
 		Subject: subject,
-		Html:    buildReceiptHTML(receiptItems, totalLine, purchaseDate),
-		Text:    buildReceiptText(receiptItems, totalLine, purchaseDate),
+		Html:    buildReceiptHTML(receiptItems, taxLine, totalLine, purchaseDate),
+		Text:    buildReceiptText(receiptItems, taxLine, totalLine, purchaseDate),
 	}
 
 	ctx := context.Background()
@@ -151,7 +174,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 	return nil
 }
 
-func buildReceiptText(items []receiptLineItem, totalLine, purchaseDate string) string {
+func buildReceiptText(items []receiptLineItem, taxLine, totalLine, purchaseDate string) string {
 	var b strings.Builder
 	b.WriteString("Thank you for your purchase!\n\n")
 	b.WriteString("Order summary\n")
@@ -163,6 +186,9 @@ func buildReceiptText(items []receiptLineItem, totalLine, purchaseDate string) s
 		}
 		b.WriteString(fmt.Sprintf("License key: %s\n\n", item.LicenseKey))
 	}
+	if taxLine != "" {
+		b.WriteString(fmt.Sprintf("Tax: %s\n", taxLine))
+	}
 	if totalLine != "" {
 		b.WriteString(fmt.Sprintf("Total paid: %s\n", totalLine))
 	}
@@ -173,7 +199,7 @@ func buildReceiptText(items []receiptLineItem, totalLine, purchaseDate string) s
 	return b.String()
 }
 
-func buildReceiptHTML(items []receiptLineItem, totalLine, purchaseDate string) string {
+func buildReceiptHTML(items []receiptLineItem, taxLine, totalLine, purchaseDate string) string {
 	var itemsHTML strings.Builder
 	for _, item := range items {
 		priceRow := ""
@@ -199,14 +225,22 @@ func buildReceiptHTML(items []receiptLineItem, totalLine, purchaseDate string) s
 				</tr>`, item.ProductName, priceRow, item.LicenseKey))
 	}
 
-	totalRow := ""
+	var totalsRows strings.Builder
+	if taxLine != "" {
+		totalsRows.WriteString(fmt.Sprintf(`
+					<tr>
+						<td style="padding:6px 0;color:#6B7280;font-family:'JetBrains Mono',monospace;font-size:14px;">Tax</td>
+						<td style="padding:6px 0;color:#111827;font-family:'JetBrains Mono',monospace;font-size:14px;text-align:right;">%s</td>
+					</tr>`, taxLine))
+	}
 	if totalLine != "" {
-		totalRow = fmt.Sprintf(`
+		totalsRows.WriteString(fmt.Sprintf(`
 					<tr>
 						<td style="padding:6px 0;color:#6B7280;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;">Total paid</td>
 						<td style="padding:6px 0;color:#111827;font-family:'JetBrains Mono',monospace;font-size:14px;text-align:right;font-weight:600;">%s</td>
-					</tr>`, totalLine)
+					</tr>`, totalLine))
 	}
+	totalRow := totalsRows.String()
 
 	licenseNote := "Keep this safe — it's tied to your product and you'll need it to activate your software."
 	if len(items) > 1 {
