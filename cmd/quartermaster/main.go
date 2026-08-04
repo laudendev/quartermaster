@@ -86,11 +86,15 @@ func main() {
 	aa := &activationAPI{st: a, pubs: []ed25519.PublicKey{pub}}
 
 	webhookMux := http.NewServeMux()
+
+	statusAPI := &sessionStatusAPI{st: q}
+	internalSecret := requireEnv("SOFTSTORE_INTERNAL_SECRET")
+
 	webhookMux.HandleFunc("POST /stripe/webhook", sa.webhook)
 	webhookMux.HandleFunc("POST /license/download", aa.download)
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 	webhookMux.HandleFunc("POST /license/activate", aa.activate)
-
+	webhookMux.HandleFunc("GET /internal/sessions/{session_id}/status", requireInternalSecret(internalSecret, statusAPI.status))
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher")
 		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher")

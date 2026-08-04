@@ -367,3 +367,79 @@ func TestReadySessionsRespectsMaxAttempts(t *testing.T) {
 		}
 	}
 }
+
+func TestGetSessionStatusNotFound(t *testing.T) {
+	s := testStore(t)
+
+	status, err := s.GetSessionStatus("no-such-session")
+	if err != nil {
+		t.Fatalf("GetSessionStatus failed: %v", err)
+	}
+	if status.Found {
+		t.Error("expected Found=false for unknown session")
+	}
+	if status.Ready {
+		t.Error("expected Ready=false for unknown session")
+	}
+}
+
+func TestGetSessionStatusPartiallySigned(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_g#0", "price_x", "PROD_A", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 0 failed: %v", err)
+	}
+	if err := s.Enqueue("txn_g#1", "price_y", "PROD_B", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 1 failed: %v", err)
+	}
+	req, _ := s.NextPending()
+	if _, _, err := s.Complete(req.ID, "KEY-1"); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	status, err := s.GetSessionStatus("txn_g")
+	if err != nil {
+		t.Fatalf("GetSessionStatus failed: %v", err)
+	}
+	if !status.Found {
+		t.Error("expected Found=true")
+	}
+	if status.Ready {
+		t.Error("expected Ready=false while one item still pending")
+	}
+	if len(status.Items) != 0 {
+		t.Errorf("expected no items exposed while not ready, got %+v", status.Items)
+	}
+}
+
+func TestGetSessionStatusFullySigned(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_h#0", "price_x", "PROD_A", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 0 failed: %v", err)
+	}
+	if err := s.Enqueue("txn_h#1", "price_y", "PROD_B", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 1 failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req, err := s.NextPending()
+		if err != nil || req == nil {
+			t.Fatalf("expected pending item %d, got %v, err %v", i, req, err)
+		}
+		if _, _, err := s.Complete(req.ID, "KEY-"+req.Product); err != nil {
+			t.Fatalf("complete item %d failed: %v", i, err)
+		}
+	}
+
+	status, err := s.GetSessionStatus("txn_h")
+	if err != nil {
+		t.Fatalf("GetSessionStatus failed: %v", err)
+	}
+	if !status.Ready {
+		t.Error("expected Ready=true once all items signed")
+	}
+	if len(status.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(status.Items))
+	}
+}

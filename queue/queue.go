@@ -237,3 +237,50 @@ func (s *Store) WaitPending(ctx context.Context, timeout time.Duration) (*SignRe
 		}
 	}
 }
+
+// SessionStatus describes the current state of a checkout session's
+// fulfillment, for polling from the storefront's thank-you page.
+type SessionStatus struct {
+	Found bool          // false if no sign_requests exist for this session at all
+	Ready bool          // true once every item has been signed
+	Items []SessionItem // populated only once Ready is true
+}
+
+// GetSessionStatus reports whether a checkout session's fulfillment is
+// complete, and its items if so. Unlike ReadySessions (a bulk sweep for
+// the email retry loop), this looks up exactly one session on demand.
+func (s *Store) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	rows, err := s.db.Query(
+		`SELECT status, product, license_key FROM sign_requests WHERE session_id = ? ORDER BY created_at`,
+		sessionID,
+	)
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	defer rows.Close()
+
+	var out SessionStatus
+	allSigned := true
+	for rows.Next() {
+		var status, product string
+		var licenseKey sql.NullString
+		if err := rows.Scan(&status, &product, &licenseKey); err != nil {
+			return SessionStatus{}, err
+		}
+		out.Found = true
+		if status != "signed" {
+			allSigned = false
+			continue
+		}
+		out.Items = append(out.Items, SessionItem{Product: product, LicenseKey: licenseKey.String})
+	}
+	if err := rows.Err(); err != nil {
+		return SessionStatus{}, err
+	}
+
+	out.Ready = out.Found && allSigned
+	if !out.Ready {
+		out.Items = nil
+	}
+	return out, nil
+}
