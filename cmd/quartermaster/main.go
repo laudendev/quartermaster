@@ -109,9 +109,19 @@ func main() {
 		Handler: webhookMux,
 	}
 
+	internalSrv := &http.Server{
+		Addr:    "10.20.0.2:6774",
+		Handler: webhookMux,
+	}
+
 	go func() {
 		log.Println("webhook server on", webhookSrv.Addr)
 		log.Fatal(webhookSrv.ListenAndServe())
+	}()
+
+	go func() {
+		log.Println("internal (wireguard) server on", internalSrv.Addr)
+		log.Fatal(internalSrv.ListenAndServe())
 	}()
 
 	go runEmailRetryLoop(q, 5*time.Minute)
