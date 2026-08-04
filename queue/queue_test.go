@@ -442,4 +442,9 @@ func TestGetSessionStatusFullySigned(t *testing.T) {
 	if len(status.Items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(status.Items))
 	}
+	for _, item := range status.Items {
+		if item.PriceID == "" {
+			t.Errorf("expected PriceID to be populated on item %+v, got empty string", item)
+		}
+	}
 }

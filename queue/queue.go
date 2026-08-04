@@ -251,7 +251,7 @@ type SessionStatus struct {
 // the email retry loop), this looks up exactly one session on demand.
 func (s *Store) GetSessionStatus(sessionID string) (SessionStatus, error) {
 	rows, err := s.db.Query(
-		`SELECT status, product, license_key FROM sign_requests WHERE session_id = ? ORDER BY created_at`,
+		`SELECT status, product, price_id, license_key FROM sign_requests WHERE session_id = ? ORDER BY created_at`,
 		sessionID,
 	)
 	if err != nil {
@@ -262,9 +262,9 @@ func (s *Store) GetSessionStatus(sessionID string) (SessionStatus, error) {
 	var out SessionStatus
 	allSigned := true
 	for rows.Next() {
-		var status, product string
+		var status, product, priceID string
 		var licenseKey sql.NullString
-		if err := rows.Scan(&status, &product, &licenseKey); err != nil {
+		if err := rows.Scan(&status, &product, &priceID, &licenseKey); err != nil {
 			return SessionStatus{}, err
 		}
 		out.Found = true
@@ -272,7 +272,7 @@ func (s *Store) GetSessionStatus(sessionID string) (SessionStatus, error) {
 			allSigned = false
 			continue
 		}
-		out.Items = append(out.Items, SessionItem{Product: product, LicenseKey: licenseKey.String})
+		out.Items = append(out.Items, SessionItem{Product: product, PriceID: priceID, LicenseKey: licenseKey.String})
 	}
 	if err := rows.Err(); err != nil {
 		return SessionStatus{}, err
