@@ -95,15 +95,17 @@ type receiptLineItem struct {
 	LicenseKey  string
 }
 
-// sendSessionReceiptEmail sends one combined receipt for an entire
-// checkout session, listing every purchased product with its own price
-// and license key, plus the session total.
-func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) error {
+// buildReceiptItems fetches Stripe's line items for a session and pairs
+// each queued item with its display name and pre-tax price, plus the
+// session's total tax and grand total. Shared by both the receipt email
+// and the thank-you page's live status endpoint, so the two stay
+// consistent by construction.
+func buildReceiptItems(sessionID string, items []queue.SessionItem) (receiptItems []receiptLineItem, taxLine, totalLine string) {
 	details, err := fetchSessionDetails(sessionID)
 	if err != nil {
-		// Don't fail the whole email over a receipt-detail lookup issue —
-		// the license keys are what actually matter to the customer.
-		log.Println("fetch stripe session details failed, sending without per-item pricing:", err)
+		// Don't fail the whole receipt over a detail lookup issue — the
+		// license keys are what actually matter to the customer.
+		log.Println("fetch stripe session details failed, building receipt without per-item pricing:", err)
 		details = &stripeSessionDetails{}
 	}
 
@@ -128,7 +130,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 		totalTaxCents += li.AmountTax
 	}
 
-	receiptItems := make([]receiptLineItem, 0, len(items))
+	receiptItems = make([]receiptLineItem, 0, len(items))
 	for _, item := range items {
 		info := infoByPriceID[item.PriceID]
 		productName := info.name
@@ -142,14 +144,20 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 		})
 	}
 
-	taxLine := ""
 	if totalTaxCents > 0 {
 		taxLine = formatAmount(totalTaxCents, details.Currency)
 	}
-	totalLine := ""
 	if details.AmountTotal > 0 {
 		totalLine = formatAmount(details.AmountTotal, details.Currency)
 	}
+	return receiptItems, taxLine, totalLine
+}
+
+// sendSessionReceiptEmail sends one combined receipt for an entire
+// checkout session, listing every purchased product with its own price
+// and license key, plus the session total.
+func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) error {
+	receiptItems, taxLine, totalLine := buildReceiptItems(sessionID, items)
 
 	purchaseDate := time.Now().Format("January 2, 2006")
 	subject := "Your receipt and license key"
