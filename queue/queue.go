@@ -19,6 +19,8 @@ const schema = `
 CREATE TABLE IF NOT EXISTS sign_requests (
     id           TEXT PRIMARY KEY,
     txn_id   TEXT UNIQUE NOT NULL,
+	session_id   TEXT NOT NULL DEFAULT '',
+	price_id     TEXT NOT NULL DEFAULT '',
     product      TEXT NOT NULL,
     email        TEXT NOT NULL,
     seats        INTEGER NOT NULL,
@@ -26,12 +28,15 @@ CREATE TABLE IF NOT EXISTS sign_requests (
     license_key  TEXT,
     reject_note  TEXT,
     created_at   INTEGER NOT NULL,
-    signed_at    INTEGER,
-	email_sent   INTEGER NOT NULL DEFAULT 0,
-	email_attempts INTEGER NOT NULL DEFAULT 0
+    signed_at    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_status ON sign_requests(status);
-CREATE INDEX IF NOT EXISTS idx_email_pending ON sign_requests(status, email_sent);
+
+CREATE TABLE IF NOT EXISTS session_emails (
+	session_id    TEXT PRIMARY KEY,
+	email_sent    INTEGER NOT NULL DEFAULT 0,
+	email_attempts INTEGER NOT NULL DEFAULT 0
+);
 `
 
 func Open(db *sql.DB) (*Store, error) {
@@ -49,15 +54,27 @@ func newID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func (s *Store) Enqueue(txnID, product, email string, seats int) error {
+// sessionIDFromTxnID derives the parent checkout session ID from a
+// per-unit txn_id of the form "{session_id}#{index}". Falls back to the
+// full txnID unchanged if no "#" is present (e.g. legacy single-item
+// txn_ids that were the raw session ID).
+func SessionIDFromTxnID(txnID string) string {
+	if i := strings.LastIndex(txnID, "#"); i != -1 {
+		return txnID[:i]
+	}
+	return txnID
+}
+
+func (s *Store) Enqueue(txnID, priceID, product, email string, seats int) error {
 	id, err := newID()
 	if err != nil {
 		return err
 	}
+	sessionID := SessionIDFromTxnID(txnID)
 	_, err = s.db.Exec(
-		`INSERT INTO sign_requests (id, txn_id, product, email, seats, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, txnID, product, email, seats, time.Now().Unix(),
+		`INSERT INTO sign_requests (id, txn_id, session_id, price_id, product, email, seats, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, txnID, sessionID, priceID, product, email, seats, time.Now().Unix(),
 	)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return nil
@@ -106,24 +123,37 @@ func (s *Store) Complete(id, licenseKey string) (string, string, error) {
 	return email, txnID, nil
 }
 
-// UnsentEmail represents a signed request whose license email hasn't
-// been successfully delivered yet.
-type UnsentEmail struct {
-	ID         string
-	TxnID      string
-	Email      string
+// SessionItem is one signed license within a checkout session, for
+// building a combined receipt email.
+type SessionItem struct {
+	Product    string
+	PriceID    string
 	LicenseKey string
-	Attempts   int
 }
 
-// PendingEmails returns signed requests that still need their license
-// email sent (or resent, after a prior failed attempt).
-func (s *Store) PendingEmails(maxAttempts int) ([]UnsentEmail, error) {
+// ReadySession represents a checkout session whose every line item has
+// finished signing and whose receipt email hasn't been sent yet.
+type ReadySession struct {
+	SessionID string
+	Email     string
+	Items     []SessionItem
+	Attempts  int
+}
+
+func (s *Store) ReadySessions(maxAttempts int) ([]ReadySession, error) {
 	rows, err := s.db.Query(
-		`SELECT id, txn_id, email, license_key, email_attempts
-		 FROM sign_requests
-		 WHERE status = 'signed' AND email_sent = 0 AND email_attempts < ?
-		 ORDER BY signed_at`,
+		`SELECT sr.session_id, sr.email, sr.product, sr.price_id, sr.license_key,
+		        COALESCE(se.email_attempts, 0)
+		 FROM sign_requests sr
+		 LEFT JOIN session_emails se ON se.session_id = sr.session_id
+		 WHERE sr.session_id IN (
+		     SELECT session_id FROM sign_requests
+		     GROUP BY session_id
+		     HAVING COUNT(*) = SUM(CASE WHEN status = 'signed' THEN 1 ELSE 0 END)
+		 )
+		 AND (se.email_sent IS NULL OR se.email_sent = 0)
+		 AND COALESCE(se.email_attempts, 0) < ?
+		 ORDER BY sr.session_id, sr.created_at`,
 		maxAttempts,
 	)
 	if err != nil {
@@ -131,28 +161,54 @@ func (s *Store) PendingEmails(maxAttempts int) ([]UnsentEmail, error) {
 	}
 	defer rows.Close()
 
-	var out []UnsentEmail
+	bySession := make(map[string]*ReadySession)
+	var order []string
 	for rows.Next() {
-		var u UnsentEmail
-		if err := rows.Scan(&u.ID, &u.TxnID, &u.Email, &u.LicenseKey, &u.Attempts); err != nil {
+		var sessionID, email, product, priceID, licenseKey string
+		var attempts int
+		if err := rows.Scan(&sessionID, &email, &product, &priceID, &licenseKey, &attempts); err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		rs, ok := bySession[sessionID]
+		if !ok {
+			rs = &ReadySession{SessionID: sessionID, Email: email, Attempts: attempts}
+			bySession[sessionID] = rs
+			order = append(order, sessionID)
+		}
+		rs.Items = append(rs.Items, SessionItem{Product: product, PriceID: priceID, LicenseKey: licenseKey})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ReadySession, 0, len(order))
+	for _, id := range order {
+		out = append(out, *bySession[id])
+	}
+	return out, nil
 }
 
-// MarkEmailSent records that the license email for this request was
-// successfully delivered.
-func (s *Store) MarkEmailSent(id string) error {
-	_, err := s.db.Exec(`UPDATE sign_requests SET email_sent = 1 WHERE id = ?`, id)
+// MarkSessionEmailSent records that the combined receipt email for this
+// checkout session was successfully delivered.
+func (s *Store) MarkSessionEmailSent(sessionID string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO session_emails (session_id, email_sent)
+		 VALUES (?, 1)
+		 ON CONFLICT(session_id) DO UPDATE SET email_sent = 1`,
+		sessionID,
+	)
 	return err
 }
 
-// RecordEmailAttempt increments the retry counter after a failed send,
-// without marking the email as sent.
-func (s *Store) RecordEmailAttempt(id string) error {
-	_, err := s.db.Exec(`UPDATE sign_requests SET email_attempts = email_attempts + 1 WHERE id = ?`, id)
+// RecordSessionEmailAttempt increments the retry counter after a failed
+// send, without marking the email as sent.
+func (s *Store) RecordSessionEmailAttempt(sessionID string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO session_emails (session_id, email_attempts)
+		 VALUES (?, 1)
+		 ON CONFLICT(session_id) DO UPDATE SET email_attempts = email_attempts + 1`,
+		sessionID,
+	)
 	return err
 }
 

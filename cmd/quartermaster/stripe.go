@@ -251,7 +251,7 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 
 		for i := int64(0); i < li.Quantity; i++ {
 			txnID := fmt.Sprintf("%s#%d", obj.ID, unitIndex)
-			if err := s.st.Enqueue(txnID, productCode, obj.CustomerDetails.Email, 1); err != nil {
+			if err := s.st.Enqueue(txnID, li.Price.ID, productCode, obj.CustomerDetails.Email, 1); err != nil {
 				log.Println("stripe webhook: enqueue failed for", txnID, ":", err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return

@@ -26,7 +26,7 @@ func testStore(t *testing.T) *Store {
 func TestEnqueueAndNextPending(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_1", "BOOK", "buyer@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_1", "price_x", "BOOK", "buyer@example.com", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -45,10 +45,10 @@ func TestEnqueueAndNextPending(t *testing.T) {
 func TestEnqueueIdempotent(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_dup", "BOOK", "a@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_dup", "price_x", "BOOK", "a@example.com", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Enqueue("txn_dup", "BOOK", "a@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_dup", "price_x", "BOOK", "a@example.com", 1); err != nil {
 		t.Fatalf("second enqueue with same txn should be absorbed, got: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestNextPendingEmptyQueue(t *testing.T) {
 
 func TestCompleteTransitionsStatus(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_complete", "BOOK", "buyer@example.com", 1)
+	s.Enqueue("txn_complete", "price_x", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	email, _, err := s.Complete(req.ID, "FAKE-KEY-123")
@@ -97,7 +97,7 @@ func TestCompleteTransitionsStatus(t *testing.T) {
 
 func TestCompleteIsIdempotent(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_dup_complete", "BOOK", "buyer@example.com", 1)
+	s.Enqueue("txn_dup_complete", "price_x", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	if _, _, err := s.Complete(req.ID, "FIRST-KEY"); err != nil {
@@ -114,7 +114,7 @@ func TestCompleteIsIdempotent(t *testing.T) {
 
 func TestRejectTransitionsStatus(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_reject", "BOOK", "buyer@example.com", 1)
+	s.Enqueue("txn_reject", "price_x", "BOOK", "buyer@example.com", 1)
 	req, _ := s.NextPending()
 
 	if err := s.Reject(req.ID, "invalid product code"); err != nil {
@@ -132,7 +132,7 @@ func TestRejectTransitionsStatus(t *testing.T) {
 
 func TestWaitPendingReturnsExistingWork(t *testing.T) {
 	s := testStore(t)
-	s.Enqueue("txn_wait", "BOOK", "buyer@example.com", 1)
+	s.Enqueue("txn_wait", "price_x", "BOOK", "buyer@example.com", 1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -186,10 +186,10 @@ func TestWaitPendingRespectsCancellation(t *testing.T) {
 	}
 }
 
-func TestPendingEmailsFindsUnsent(t *testing.T) {
+func TestReadySessionsFindsFullySignedSession(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_1", "PROD", "buyer@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_a#0", "price_x", "PROD", "buyer@example.com", 1); err != nil {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 	req, err := s.NextPending()
@@ -200,25 +200,88 @@ func TestPendingEmailsFindsUnsent(t *testing.T) {
 		t.Fatalf("complete failed: %v", err)
 	}
 
-	pending, err := s.PendingEmails(5)
+	ready, err := s.ReadySessions(5)
 	if err != nil {
-		t.Fatalf("PendingEmails failed: %v", err)
+		t.Fatalf("ReadySessions failed: %v", err)
 	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending email, got %d", len(pending))
+	if len(ready) != 1 {
+		t.Fatalf("expected 1 ready session, got %d", len(ready))
 	}
-	if pending[0].Email != "buyer@example.com" {
-		t.Errorf("expected buyer@example.com, got %q", pending[0].Email)
+	if ready[0].SessionID != "txn_a" {
+		t.Errorf("expected session id 'txn_a', got %q", ready[0].SessionID)
 	}
-	if pending[0].TxnID != "txn_1" {
-		t.Errorf("expected txn_1, got %q", pending[0].TxnID)
+	if ready[0].Email != "buyer@example.com" {
+		t.Errorf("expected buyer@example.com, got %q", ready[0].Email)
+	}
+	if len(ready[0].Items) != 1 || ready[0].Items[0].LicenseKey != "LICENSE-KEY-123" {
+		t.Errorf("unexpected items: %+v", ready[0].Items)
 	}
 }
 
-func TestMarkEmailSentExcludesFromPending(t *testing.T) {
+func TestReadySessionsExcludesPartiallySignedSession(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_2", "PROD", "buyer2@example.com", 1); err != nil {
+	// Two units in the same session; only sign one.
+	if err := s.Enqueue("txn_b#0", "price_x", "PROD_A", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 0 failed: %v", err)
+	}
+	if err := s.Enqueue("txn_b#1", "price_y", "PROD_B", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 1 failed: %v", err)
+	}
+
+	req, _ := s.NextPending()
+	if _, _, err := s.Complete(req.ID, "LICENSE-KEY-FIRST"); err != nil {
+		t.Fatalf("complete first item failed: %v", err)
+	}
+
+	// One of the two units is still pending — session should NOT be ready.
+	ready, err := s.ReadySessions(5)
+	if err != nil {
+		t.Fatalf("ReadySessions failed: %v", err)
+	}
+	for _, rs := range ready {
+		if rs.SessionID == "txn_b" {
+			t.Errorf("expected partially-signed session 'txn_b' to be excluded, got %+v", rs)
+		}
+	}
+}
+
+func TestReadySessionsIncludesAllItemsOnceFullySigned(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_c#0", "price_x", "PROD_A", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 0 failed: %v", err)
+	}
+	if err := s.Enqueue("txn_c#1", "price_y", "PROD_B", "buyer@example.com", 1); err != nil {
+		t.Fatalf("enqueue item 1 failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req, err := s.NextPending()
+		if err != nil || req == nil {
+			t.Fatalf("expected pending item %d, got %v, err %v", i, req, err)
+		}
+		if _, _, err := s.Complete(req.ID, "LICENSE-KEY-"+req.Product); err != nil {
+			t.Fatalf("complete item %d failed: %v", i, err)
+		}
+	}
+
+	ready, err := s.ReadySessions(5)
+	if err != nil {
+		t.Fatalf("ReadySessions failed: %v", err)
+	}
+	if len(ready) != 1 {
+		t.Fatalf("expected 1 ready session, got %d", len(ready))
+	}
+	if len(ready[0].Items) != 2 {
+		t.Fatalf("expected 2 items in ready session, got %d: %+v", len(ready[0].Items), ready[0].Items)
+	}
+}
+
+func TestMarkSessionEmailSentExcludesFromReady(t *testing.T) {
+	s := testStore(t)
+
+	if err := s.Enqueue("txn_d#0", "price_x", "PROD", "buyer@example.com", 1); err != nil {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 	req, _ := s.NextPending()
@@ -226,25 +289,25 @@ func TestMarkEmailSentExcludesFromPending(t *testing.T) {
 		t.Fatalf("complete failed: %v", err)
 	}
 
-	if err := s.MarkEmailSent(req.ID); err != nil {
-		t.Fatalf("MarkEmailSent failed: %v", err)
+	if err := s.MarkSessionEmailSent("txn_d"); err != nil {
+		t.Fatalf("MarkSessionEmailSent failed: %v", err)
 	}
 
-	pending, err := s.PendingEmails(5)
+	ready, err := s.ReadySessions(5)
 	if err != nil {
-		t.Fatalf("PendingEmails failed: %v", err)
+		t.Fatalf("ReadySessions failed: %v", err)
 	}
-	for _, p := range pending {
-		if p.ID == req.ID {
-			t.Errorf("expected request %s to be excluded after MarkEmailSent, but it was still pending", req.ID)
+	for _, rs := range ready {
+		if rs.SessionID == "txn_d" {
+			t.Errorf("expected session 'txn_d' to be excluded after MarkSessionEmailSent, but it was still ready")
 		}
 	}
 }
 
-func TestRecordEmailAttemptIncrementsCounter(t *testing.T) {
+func TestRecordSessionEmailAttemptIncrementsCounter(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_3", "PROD", "buyer3@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_e#0", "price_x", "PROD", "buyer@example.com", 1); err != nil {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 	req, _ := s.NextPending()
@@ -252,35 +315,35 @@ func TestRecordEmailAttemptIncrementsCounter(t *testing.T) {
 		t.Fatalf("complete failed: %v", err)
 	}
 
-	if err := s.RecordEmailAttempt(req.ID); err != nil {
-		t.Fatalf("RecordEmailAttempt failed: %v", err)
+	if err := s.RecordSessionEmailAttempt("txn_e"); err != nil {
+		t.Fatalf("RecordSessionEmailAttempt failed: %v", err)
 	}
-	if err := s.RecordEmailAttempt(req.ID); err != nil {
-		t.Fatalf("RecordEmailAttempt failed: %v", err)
+	if err := s.RecordSessionEmailAttempt("txn_e"); err != nil {
+		t.Fatalf("RecordSessionEmailAttempt failed: %v", err)
 	}
 
-	pending, err := s.PendingEmails(5)
+	ready, err := s.ReadySessions(5)
 	if err != nil {
-		t.Fatalf("PendingEmails failed: %v", err)
+		t.Fatalf("ReadySessions failed: %v", err)
 	}
 	var found bool
-	for _, p := range pending {
-		if p.ID == req.ID {
+	for _, rs := range ready {
+		if rs.SessionID == "txn_e" {
 			found = true
-			if p.Attempts != 2 {
-				t.Errorf("expected 2 attempts recorded, got %d", p.Attempts)
+			if rs.Attempts != 2 {
+				t.Errorf("expected 2 attempts recorded, got %d", rs.Attempts)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("expected request %s to still be pending after 2 failed attempts", req.ID)
+		t.Fatalf("expected session 'txn_e' to still be ready after 2 failed attempts")
 	}
 }
 
-func TestPendingEmailsRespectsMaxAttempts(t *testing.T) {
+func TestReadySessionsRespectsMaxAttempts(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.Enqueue("txn_4", "PROD", "buyer4@example.com", 1); err != nil {
+	if err := s.Enqueue("txn_f#0", "price_x", "PROD", "buyer@example.com", 1); err != nil {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 	req, _ := s.NextPending()
@@ -288,20 +351,19 @@ func TestPendingEmailsRespectsMaxAttempts(t *testing.T) {
 		t.Fatalf("complete failed: %v", err)
 	}
 
-	// Exceed the retry cap.
 	for i := 0; i < 5; i++ {
-		if err := s.RecordEmailAttempt(req.ID); err != nil {
-			t.Fatalf("RecordEmailAttempt failed: %v", err)
+		if err := s.RecordSessionEmailAttempt("txn_f"); err != nil {
+			t.Fatalf("RecordSessionEmailAttempt failed: %v", err)
 		}
 	}
 
-	pending, err := s.PendingEmails(5)
+	ready, err := s.ReadySessions(5)
 	if err != nil {
-		t.Fatalf("PendingEmails failed: %v", err)
+		t.Fatalf("ReadySessions failed: %v", err)
 	}
-	for _, p := range pending {
-		if p.ID == req.ID {
-			t.Errorf("expected request %s to be excluded once attempts reach the cap, but it was still pending", req.ID)
+	for _, rs := range ready {
+		if rs.SessionID == "txn_f" {
+			t.Errorf("expected session 'txn_f' to be excluded once attempts reach the cap, but it was still ready")
 		}
 	}
 }

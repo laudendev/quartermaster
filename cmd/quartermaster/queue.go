@@ -56,25 +56,47 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, txnID, err := q.st.Complete(body.ID, body.LicenseKey)
+	_, txnID, err := q.st.Complete(body.ID, body.LicenseKey)
 	if err != nil {
 		log.Println("queue complete: store update failed for", body.ID, ":", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	log.Println("queue complete: signed", body.ID)
-	if email != "" {
-		if err := sendLicenseEmail(txnID, email, body.LicenseKey); err != nil {
-			log.Println("email send failed:", err)
-			if rerr := q.st.RecordEmailAttempt(body.ID); rerr != nil {
-				log.Println("record email attempt failed:", rerr)
+
+	sessionID := queue.SessionIDFromTxnID(txnID)
+	if err := q.trySendReadySessionEmail(sessionID); err != nil {
+		log.Println("queue complete: session email check failed for", sessionID, ":", err)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// trySendReadySessionEmail checks whether the given session's every
+// license has finished signing, and if so, sends the combined receipt
+// email exactly once.
+func (q *queueAPI) trySendReadySessionEmail(sessionID string) error {
+	const maxAttempts = maxEmailAttempts
+	ready, err := q.st.ReadySessions(maxAttempts)
+	if err != nil {
+		return err
+	}
+
+	for _, rs := range ready {
+		if rs.SessionID != sessionID {
+			continue
+		}
+		if err := sendSessionReceiptEmail(rs.SessionID, rs.Email, rs.Items); err != nil {
+			log.Println("email send failed for session", rs.SessionID, ":", err)
+			if rerr := q.st.RecordSessionEmailAttempt(rs.SessionID); rerr != nil {
+				log.Println("record session email attempt failed:", rerr)
 			}
-		} else {
-			log.Println("email sent:", email)
-			if merr := q.st.MarkEmailSent(body.ID); merr != nil {
-				log.Println("mark email sent failed:", merr)
-			}
+			return nil
+		}
+		log.Println("email sent for session", rs.SessionID, "to", rs.Email)
+		if merr := q.st.MarkSessionEmailSent(rs.SessionID); merr != nil {
+			log.Println("mark session email sent failed:", merr)
 		}
 	}
-	w.WriteHeader(http.StatusOK)
+	return nil
 }

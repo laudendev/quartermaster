@@ -12,36 +12,36 @@ import (
 // shouldn't retry forever and burn through Resend's API quota.
 const maxEmailAttempts = 5
 
-// runEmailRetryLoop periodically checks for signed license requests whose
-// email failed to send (or was never sent), and retries delivery. This
-// covers the case where sendLicenseEmail failed inline at signing time —
-// for example, if quartermaster crashed or Resend/Stripe were briefly
-// unreachable — without silently leaving the customer without their key.
+// runEmailRetryLoop periodically checks for checkout sessions whose
+// combined receipt email failed to send (or was never sent — e.g. if
+// quartermaster crashed between signing the last item and sending),
+// and retries delivery, without silently leaving the customer without
+// their license keys.
 func runEmailRetryLoop(st *queue.Store, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		pending, err := st.PendingEmails(maxEmailAttempts)
+		ready, err := st.ReadySessions(maxEmailAttempts)
 		if err != nil {
-			log.Println("email retry: failed to query pending emails:", err)
+			log.Println("email retry: failed to query ready sessions:", err)
 			continue
 		}
-		if len(pending) == 0 {
+		if len(ready) == 0 {
 			continue
 		}
 
-		log.Println("email retry: found", len(pending), "unsent license email(s)")
-		for _, p := range pending {
-			if err := sendLicenseEmail(p.TxnID, p.Email, p.LicenseKey); err != nil {
-				log.Println("email retry: send failed for", p.Email, "(attempt", p.Attempts+1, "):", err)
-				if rerr := st.RecordEmailAttempt(p.ID); rerr != nil {
+		log.Println("email retry: found", len(ready), "session(s) awaiting receipt email")
+		for _, rs := range ready {
+			if err := sendSessionReceiptEmail(rs.SessionID, rs.Email, rs.Items); err != nil {
+				log.Println("email retry: send failed for session", rs.SessionID, "(attempt", rs.Attempts+1, "):", err)
+				if rerr := st.RecordSessionEmailAttempt(rs.SessionID); rerr != nil {
 					log.Println("email retry: failed to record attempt:", rerr)
 				}
 				continue
 			}
-			log.Println("email retry: sent to", p.Email, "after", p.Attempts+1, "attempt(s)")
-			if merr := st.MarkEmailSent(p.ID); merr != nil {
+			log.Println("email retry: sent receipt for session", rs.SessionID, "to", rs.Email, "after", rs.Attempts+1, "attempt(s)")
+			if merr := st.MarkSessionEmailSent(rs.SessionID); merr != nil {
 				log.Println("email retry: failed to mark sent:", merr)
 			}
 		}
