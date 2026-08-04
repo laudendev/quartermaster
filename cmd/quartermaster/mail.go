@@ -38,10 +38,11 @@ type stripeSessionDetails struct {
 	Currency    string `json:"currency"`
 	LineItems   struct {
 		Data []struct {
-			Description string `json:"description"`
-			AmountTotal int64  `json:"amount_total"`
-			AmountTax   int64  `json:"amount_tax"`
-			Price       struct {
+			Description    string `json:"description"`
+			AmountSubtotal int64  `json:"amount_subtotal"`
+			AmountTotal    int64  `json:"amount_total"`
+			AmountTax      int64  `json:"amount_tax"`
+			Price          struct {
 				ID string `json:"id"`
 			} `json:"price"`
 		} `json:"data"`
@@ -112,6 +113,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 		name       string
 		amountLine string
 	}
+
 	infoByPriceID := make(map[string]lineItemInfo)
 	var totalTaxCents int64
 	for _, li := range details.LineItems.Data {
@@ -121,7 +123,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 		}
 		infoByPriceID[li.Price.ID] = lineItemInfo{
 			name:       name,
-			amountLine: formatAmount(li.AmountTotal, details.Currency),
+			amountLine: formatAmount(li.AmountSubtotal, details.Currency),
 		}
 		totalTaxCents += li.AmountTax
 	}
