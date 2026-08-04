@@ -78,32 +78,66 @@ rather than merely unlikely.
 
 ![Quartermaster purchase flow](quartermaster_purchase_flow.svg)
 
-1. Customer completes Stripe Checkout.
+A purchase is one Stripe Checkout session, but may contain several
+distinct products and quantities — a cart, not a single item. The
+flow below reflects that: one webhook fires per session, but it can
+produce several sign requests and always produces exactly one
+receipt email, however many products were in the cart.
+
+1. Customer checks out — one or several products, softstore builds a
+   single Stripe Checkout Session for the whole cart.
 2. Stripe sends `checkout.session.completed` to
    `https://quartermaster.<domain>/stripe/webhook`.
 3. quartermaster verifies the HMAC signature (Stripe-Signature
    header) over the raw, unparsed request body, checks the request
    is fresh (replay defense, 5-minute window), checks the customer's
    billing country is US (Radar + this check are defense in depth
-   for each other), floors seats to 1 and rejects anything over 24
-   as a likely metadata-integrity problem, then enqueues a
-   `sign_requests` row.
-4. The signer, long-polling `GET /queue/wait` over the WireGuard
-   tunnel, picks up the request.
-5. The signer verifies the request has a recognized product code,
-   then calls `license.Issue` with the private key to produce a
-   signed, Ed25519-backed license.
-6. The signer posts the result to `POST /queue/complete`.
-7. quartermaster marks the row `signed`, stores the license key, and
-   emails it to the customer via Resend.
-8. The customer's app calls `POST /license/activate` once, on first
-   run, with the license key and a local machine fingerprint.
-9. quartermaster verifies the license signature independently (using
-   only the *public* key — no trust in the signer required at this
-   step), checks the license isn't revoked, checks a seat is
-   available, and records the activation.
-10. Every subsequent app launch is fully offline — no further
+   for each other).
+4. quartermaster fetches the session's real line items from Stripe
+   (quantities, Price IDs) rather than trusting webhook metadata for
+   cart contents, and rejects the whole session if total units
+   exceed 24, the same integrity ceiling as before.
+5. For each unit purchased, quartermaster resolves the Stripe Price
+   ID to a product code by calling softstore's internal API over
+   WireGuard, then enqueues one single-seat `sign_requests` row per
+   unit — a cart of three distinct products becomes three rows, not
+   one row with `seats: 3`.
+6. The signer, long-polling `GET /queue/wait` over its own WireGuard
+   tunnel, picks up each request independently and in whatever order
+   they're queued.
+7. For each request, the signer verifies it has a recognized product
+   code, then calls `license.Issue` with the private key to produce
+   a signed, Ed25519-backed license, and posts the result to `POST
+   /queue/complete`.
+8. Each time a unit is marked `signed`, quartermaster checks whether
+   every other unit belonging to the same Checkout Session is also
+   signed. Only once the whole session is complete does it fetch the
+   session's full line-item detail from Stripe (names, per-item
+   price, tax) and send one combined receipt email listing every
+   product and license key together — never one email per item.
+9. If the purchase went through softstore's cart (rather than a
+   single-item "buy now"), the session carries a cart token in its
+   metadata; once the combined email has been sent, quartermaster
+   calls softstore's internal API to clear that cart, so a completed
+   order doesn't linger and reappear on the customer's next visit.
+10. The customer's app calls `POST /license/activate` once per
+    license, on first run, with the license key and a local machine
+    fingerprint.
+11. quartermaster verifies the license signature independently
+    (using only the *public* key — no trust in the signer required
+    at this step), checks the license isn't revoked, checks a seat
+    is available, and records the activation.
+12. Every subsequent app launch is fully offline — no further
     network calls unless the user explicitly deactivates.
+
+Separately, and optionally: softstore's thank-you page polls
+`GET /internal/sessions/{id}/status` (a third listener, see below)
+every few seconds after checkout, so the receipt and license keys
+can appear directly on the page — the same combined-receipt data as
+the email, available slightly before or around the same time the
+email itself arrives. This is a convenience for the buyer, not part
+of the fulfillment path itself; if softstore or the poll never
+succeeds, the email still arrives via steps 8–9 regardless.
 
 ## The license itself
 
@@ -181,9 +215,21 @@ after the first sale, only *how many machines* are using it at once.
 
 | Component | Can do | Cannot do |
 |---|---|---|
-| Droplet (quartermaster) | Verify licenses (public key), queue requests, enforce business rules and seats, send email | Mint new licenses |
+| Droplet (quartermaster) | Verify licenses (public key), queue requests, enforce business rules and seats, send email, look up product codes and clear carts on softstore (shared-secret-authenticated) | Mint new licenses |
 | Signer (home machine) | Mint licenses (private key), initiate connections to the droplet | Accept inbound connections from anywhere |
 | Customer's app | Verify its own license (public key) | Verify *other* licenses, or forge one |
+| Softstore (separate droplet) | Look up fulfillment status for its own checkout sessions (shared-secret-authenticated) | Read fulfillment status for a session it didn't create, mint or resolve licenses, reach quartermaster except over the dedicated WireGuard tunnel |
+
+Quartermaster and softstore trust each other only as far as the
+shared secret and the WireGuard tunnel between them extend — neither
+service exposes its internal endpoints publicly, and the secret
+authenticates the *service*, not any individual request's contents
+(there's no per-session authorization; softstore could poll the
+status of a session it didn't originate if it knew the ID, since
+session IDs function as unguessable-in-practice random tokens, not a
+capability check). This is an accepted, narrow trust boundary: both
+services are operated by the same person, on infrastructure only
+that person controls.
 
 ## Components
 
@@ -210,10 +256,16 @@ after the first sale, only *how many machines* are using it at once.
   GOARCH=amd64`), shipped via `./deploy.sh` (tests → build → scp to
   a staging directory → an `inotifywait`-based watcher on the droplet
   detects the new binary and redeploys automatically). Runs as a
-  systemd service, two listeners: a loopback-only webhook port behind
-  Caddy (public HTTPS, real Let's Encrypt cert), and a WireGuard-
-  interface-only queue API port (never reachable from the public
-  internet).
+  systemd service, three listeners: a loopback-only webhook port
+  behind Caddy (public HTTPS, real Let's Encrypt cert), a WireGuard-
+  interface-only queue API port on the signer's tunnel (`10.46.0.0/24`,
+  never reachable from the public internet), and a second, separate
+  WireGuard-interface-only port on a distinct tunnel to softstore
+  (`10.20.0.0/24`) — two tunnels, not one, because the signer and
+  softstore are different trust relationships with different peers;
+  collapsing them into one tunnel would mean a compromise of either
+  peer has network-level reach toward the other.
+
 - **signer**: runs as a systemd service on the home machine, boots
   independent of any login session, polls the tunnel continuously.
   Never deployed anywhere else.
@@ -225,11 +277,16 @@ the incident runbook.
 
 Every trust boundary has real test coverage: signature verification
 (valid, tampered, wrong secret, expired, malformed, unrecognized
-version), the webhook's business logic (country gate, seat floor and
-ceiling, enqueue, metadata parsing), the queue's idempotency and
-concurrency behavior (long-poll, timeout, cancellation), the signer's
-full HTTP and cryptographic path (mocked server, real key generation,
-real license verification), the activation model's seat math
-(single-seat, multi-seat, same-machine idempotency, resale flow), and
-the keygen tool's file-permission guarantees. See each package's
-`*_test.go` for specifics.
+version), the webhook's business logic (country gate, unit-count
+ceiling, per-unit enqueue with real Stripe line-item fakes standing
+in for the network call), the queue's idempotency and concurrency
+behavior (long-poll, timeout, cancellation), the session-completion
+logic specifically — a session with one item pending is correctly
+excluded from "ready," a fully-signed multi-item session correctly
+includes every item, a session's email is sent exactly once even
+under retry — the signer's full HTTP and cryptographic path (mocked
+server, real key generation, real license verification), the
+activation model's seat math (single-seat, multi-seat, same-machine
+idempotency, resale flow), the internal status endpoint's shared-
+secret rejection, and the keygen tool's file-permission guarantees.
+See each package's `*_test.go` for specifics.

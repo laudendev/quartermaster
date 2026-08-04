@@ -30,8 +30,10 @@ issue real licenses to real customers.
 
 ## What it does
 
-Reacts to confirmed Stripe payments, issues Ed25519-signed licenses,
-enforces per-seat activation, and delivers the result by email — no
+Reacts to confirmed Stripe payments — single products or a cart of
+several at once — issues an Ed25519-signed license per item
+purchased, enforces per-seat activation, and delivers every license
+from one order together in a single combined receipt email — no
 per-transaction fee beyond Stripe's own, no per-user cap, no
 dependency on any third-party licensing vendor's uptime.
 
@@ -129,7 +131,7 @@ worth taking.
 
 | Path | What it is |
 |---|---|
-| `cmd/quartermaster` | The public-facing service: Stripe webhook, activation API, queue API. Runs on the droplet. |
+| `cmd/quartermaster` | The public-facing service: Stripe webhook, activation API, queue API, and a softstore-facing internal API for product lookups, session status polling, and cart clearing. Runs on the droplet. |
 | `cmd/signer` | Polls the queue, signs licenses with the private key. Runs on trusted hardware only — never the droplet. |
 | `cmd/keygen` | One-time Ed25519 keypair generation for `signer`. |
 | `license` | The signed license format itself — construction, signing, verification. |

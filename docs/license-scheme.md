@@ -51,13 +51,24 @@ first, and only calls `ed25519.Verify` if the version is recognized.
 
 - `0` supplied at issuance is coerced to `1`. A license always
   represents at least one seat.
-- The webhook layer (`stripe.go`) enforces the real-world ceiling:
-  metadata `seats` values above 24 are rejected outright — the
-  checkout is acknowledged (so Stripe doesn't retry) but never
-  enqueued, and the rejection is logged clearly, since a value that
-  far out of range is treated as a signal that something upstream
-  (a Checkout misconfiguration, a tampered request) is wrong, not as
-  a large but legitimate order.
+- Every license issued today has exactly 1 seat by construction — a
+  cart with quantity 3 of one product produces three separate
+  single-seat licenses, not one 3-seat license. `seats > 1` is
+  supported by the format and by `license.Issue`, but nothing in the
+  current webhook path ever constructs one; it's a capability the
+  format reserves, not one exercised yet.
+- The webhook layer (`stripe.go`) enforces a real-world ceiling on a
+  *checkout session's total unit count* instead: more than 24 units
+  purchased in one session is rejected outright — the checkout is
+  acknowledged (so Stripe doesn't retry) but nothing is enqueued, and
+  the rejection is logged clearly, since a value that far out of
+  range is treated as a signal that something upstream (a Checkout
+  misconfiguration, a tampered request) is wrong, not as a large but
+  legitimate order. This replaced an earlier, narrower version of
+  the same idea that read a `seats` value out of webhook metadata; a
+  multi-item cart made that field meaningless (which item's
+  metadata.seats would even mean), so the ceiling was moved to sum
+  actual Stripe line-item quantities instead.
 - `license.Issue` itself does not enforce an upper bound — the cap
   is a business rule enforced once, at the point of intake, not a
   property of the wire format. The format can technically represent
@@ -124,7 +135,7 @@ seat count.
 | Forging a Stripe webhook request | Prevented | HMAC-SHA256 over the raw body, keyed with the webhook signing secret, with a 5-minute replay window. Requires possession of the secret, which is issued by Stripe and never transmitted in any request. |
 | Independent confirmation that a webhook's transaction ID exists at Stripe | Not implemented, deliberate | Authenticity relies solely on HMAC verification of the signed payload, the standard trust boundary for Stripe webhooks. No callback to Stripe's API re-confirms the session server-side. |
 | Webhook signing secret leaking | Not prevented by the license scheme itself | A leaked secret allows unlimited valid-looking sign requests until rotated. No request-volume rate limiting is implemented today; see `docs/operations.md` for the monitoring and rotation plan. |
-| A crafted seat count far outside realistic range (e.g. `500`) arriving via webhook metadata | Prevented | Rejected outright above 24, logged as a likely integrity problem, never enqueued. See "Seats" above. |
+| A crafted unit count far outside realistic range (e.g. `500`) in a checkout session | Prevented | Rejected outright above 24 total units, logged as a likely integrity problem, never enqueued. Checked against Stripe's own line-item quantities, not a client-supplied metadata field. See "Seats" above. |
 | A future payload version being misparsed under the current version's offsets | Prevented | `Verify` checks the version byte and refuses unrecognized versions before attempting to read any other field. |
 | Base32 encoding/decoding "hiding" license contents | Not a goal, not relied upon | Base32 is a reversible, public representation with no secrecy property. Trailing bits in the last character of a non-block-aligned payload length carry no semantic weight and cannot be used to construct a different valid payload — see `license_test.go`'s tamper test, which flips every raw byte (not every encoded character) specifically to avoid a false sense of coverage from base32's own padding slack. |
 | Refund or chargeback after a license is issued and activated | Not prevented, accepted cost | The signature doesn't know about payment status. A `revoked` flag exists for chargebacks specifically, checked on every activation attempt, but a machine already activated before revocation keeps working until it needs to reactivate. |

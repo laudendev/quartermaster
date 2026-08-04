@@ -143,9 +143,15 @@ depends on.
 
 ## Backups
 
-`activations` and `sign_requests` are the business — losing this
-database means losing the record of who has activated what, and any
-license keys not yet delivered.
+`activations`, `sign_requests`, and `session_emails` are the
+business — losing this database means losing the record of who has
+activated what, any license keys not yet delivered, and which
+sessions have already had their combined receipt email sent (a
+restore from an older backup can under-count `session_emails`,
+meaning a customer whose email already went out gets a duplicate on
+the next retry pass — annoying, not dangerous, since the email itself
+is idempotent-safe to receive twice, but worth knowing about rather
+than being surprised by after a restore).
 
 ### Why a raw file copy is not safe
 
@@ -258,13 +264,37 @@ cp <backup file> /opt/quartermaster/quartermaster.db
 rm -f /opt/quartermaster/quartermaster.db-wal /opt/quartermaster/quartermaster.db-shm
 systemctl start quartermaster
 ```
-
 ## Secret management
 
-Two secrets, both loaded via `/etc/quartermaster.env`
-(`EnvironmentFile=` in the systemd unit): `STRIPE_WEBHOOK_SECRET` and
-`RESEND_API_KEY`. Both must **only** ever exist there — never
-hardcoded in source, never committed, never placed anywhere else.
+Four secrets, all loaded via `/etc/quartermaster.env`
+(`EnvironmentFile=` in the systemd unit): `STRIPE_WEBHOOK_SECRET`,
+`RESEND_API_KEY`, `STRIPE_SECRET_KEY`, and `SOFTSTORE_INTERNAL_SECRET`.
+All four must **only** ever exist there — never hardcoded in source,
+never committed, never placed anywhere else.
+
+`STRIPE_SECRET_KEY` is newer than the other three (added when the
+webhook started fetching line items directly from Stripe's API,
+rather than relying solely on webhook payload contents) and is used
+for two distinct outbound calls: fetching a session's finalized line
+items for fulfillment, and fetching receipt detail (names, per-item
+price, tax) for the combined email. Unlike `STRIPE_WEBHOOK_SECRET`
+(which *verifies inbound* requests), this key *authenticates
+outbound* calls Quartermaster makes to Stripe — a leak has different
+blast radius (read access to Stripe account data via the API, not
+forged webhook deliveries) and should be rotated in the Stripe
+dashboard's API keys section, not the webhook signing secrets
+section.
+
+`SOFTSTORE_INTERNAL_SECRET` is shared with softstore — the identical
+value must exist in both `/etc/quartermaster.env` on this droplet and
+`/etc/softstore/env` (as `INTERNAL_API_SECRET`, a different variable
+name for the same value) on softstore-prod. It authenticates the
+WireGuard-tunneled calls between the two services in both directions
+(Quartermaster looking up product codes and clearing carts on
+softstore; softstore polling Quartermaster for fulfillment status).
+Rotating it requires updating **both** droplets and restarting both
+services — updating only one side breaks the internal API silently
+(requests fail with `401` until both sides agree again).
 
 **On 2026-07-19, this rule was violated in early development
 history**: both a Resend API key and a Stripe webhook secret were
@@ -309,6 +339,36 @@ If it's ever suspected to have leaked, rotate it:
 Rotation is cheap. If in doubt, rotate — there's no meaningful cost
 to doing this preemptively versus waiting for certainty of
 compromise.
+
+## Softstore connectivity
+
+Quartermaster and softstore communicate over a dedicated WireGuard
+tunnel, `10.20.0.0/24` (`wg1` on both droplets) — separate from the
+tunnel the signer uses (`10.46.0.0/24`, `wg0`). Two tunnels
+deliberately, not one: the signer and softstore are different trust
+relationships with different peers, and collapsing them would give a
+compromise of either peer network-level reach toward the other.
+
+**If softstore-facing calls start failing** (product code lookups
+during webhook processing, cart-clear calls, or softstore's own
+status polling failing on its side):
+
+```bash
+sudo wg show wg1
+```
+
+Confirm a recent handshake (`latest handshake`) — if it's missing or
+very old, the tunnel itself is down, not the application. Check
+`sudo systemctl status wg-quick@wg1` on both droplets, and confirm
+`ufw` still allows the internal port on `wg1` specifically
+(`sudo ufw status | grep wg1`) — a firewall rule change on either
+side is a more common cause of a broken tunnel than the WireGuard
+interface itself failing.
+
+If the tunnel is up but calls still fail with `401`, the shared
+secret has drifted out of sync between `SOFTSTORE_INTERNAL_SECRET`
+here and `INTERNAL_API_SECRET` on softstore — see "Secret
+management" above.
 
 ## Monitoring webhook volume
 
@@ -468,18 +528,53 @@ unplanned fault rather than only reasoned about in the abstract.
 
 ## Support: customer never received their license email
 
-The license key is stored in the `sign_requests` row regardless of
-whether the email send succeeded (see `docs/api.md`). Look up by
-Stripe session ID or customer email:
+One purchase produces one combined receipt email covering every
+product in that session, not one email per license — see
+`docs/api.md`'s "Combined receipt." Every license key is stored in
+its `sign_requests` row regardless of whether that email ever went
+out, so the keys themselves are never actually lost; what's worth
+checking is whether the *email* was sent, retried, or is stuck.
+
+**Find every license key for a session or customer:**
 
 ```bash
 sqlite3 /opt/quartermaster/quartermaster.db \
-  "SELECT license_key FROM sign_requests WHERE email = 'customer@example.com' AND status = 'signed';"
+  "SELECT session_id, product, license_key, status FROM sign_requests WHERE email = 'customer@example.com' ORDER BY created_at;"
 ```
 
-Resend manually, or relay the key directly. There is no automatic
-retry, because retrying delivery to a wrong or mistyped address
-wouldn't help — the fix is always a manual lookup and resend.
+If any row shows `status != 'signed'`, that item genuinely isn't
+ready yet — the signer hasn't picked it up, or is down (see
+"Observed in practice" below for what a signer outage looks like;
+Quartermaster keeps queuing normally, the item just waits).
+
+**Check whether the session's receipt email actually sent:**
+
+```bash
+sqlite3 /opt/quartermaster/quartermaster.db \
+  "SELECT * FROM session_emails WHERE session_id = '<session_id from above>';"
+```
+
+- No row at all: the session either isn't fully signed yet (every
+  item must be `signed` before an email is attempted at all — see
+  `docs/api.md`), or the automatic retry loop simply hasn't run
+  since it became ready. Wait for the next retry pass (`runEmailRetryLoop`,
+  interval set in `cmd/quartermaster/main.go`) or restart the service
+  to force an immediate check.
+- `email_sent = 0`, `email_attempts > 0`: delivery has failed at
+  least once (bad address, Resend outage) and will keep auto-retrying
+  up to `maxEmailAttempts` (currently 5, in `email_retry.go`). Above
+  that cap, retries stop permanently and this becomes a manual
+  support action.
+- `email_sent = 1`: the email genuinely went out. A "never received"
+  report at this point usually means spam filtering or a mistyped
+  address, not a system failure — verify the address on the Stripe
+  side of the transaction before assuming anything is broken here.
+
+**Manual resend:** there is no built-in resend command. Relay the
+license keys from the first query directly to the customer, or
+manually re-trigger `sendSessionReceiptEmail` for that session via a
+one-off script if a properly-formatted receipt (not just raw keys)
+matters for the interaction.
 
 ## Support: customer needs to reactivate after an OS reinstall
 
