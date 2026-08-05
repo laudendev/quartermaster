@@ -28,7 +28,7 @@ type lineItemFetcher interface {
 // code. Abstracted so tests can supply a fake instead of calling
 // softstore's real internal API over the network.
 type productResolver interface {
-	resolveProductCode(priceID string) (string, error)
+	resolveProduct(priceID string) (productCode string, seats int64, err error)
 }
 
 // cartClearer empties a softstore cart after its purchase has been
@@ -124,33 +124,37 @@ func (c *realStripeClient) fetchLineItems(sessionID string) ([]stripeLineItem, e
 // productCodeResponse mirrors softstore's internal lookup response shape.
 type productCodeResponse struct {
 	ProductCode string `json:"product_code"`
+	Seats       int64  `json:"seats"`
 }
 
-// resolveProductCode calls softstore's internal API to translate a Stripe
+// resolveProduct calls softstore's internal API to translate a Stripe
 // Price ID (from a completed checkout's line items) into the product
-// code Quartermaster uses for licensing and file delivery.
-func (c *realSoftstoreClient) resolveProductCode(priceID string) (string, error) {
+// code and seat count Quartermaster uses for licensing and file delivery.
+func (c *realSoftstoreClient) resolveProduct(priceID string) (productCode string, seats int64, err error) {
 	url := fmt.Sprintf("%s/internal/products/by-price/%s", c.baseURL, priceID)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("build softstore lookup request: %w", err)
+		return "", 0, fmt.Errorf("build softstore lookup request: %w", err)
 	}
 	req.Header.Set("X-Internal-Secret", c.internalKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("softstore lookup: %w", err)
+		return "", 0, fmt.Errorf("softstore lookup: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("softstore lookup: unexpected status %d for price %s", resp.StatusCode, priceID)
+		return "", 0, fmt.Errorf("softstore lookup: unexpected status %d for price %s", resp.StatusCode, priceID)
 	}
 
 	var parsed productCodeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", fmt.Errorf("decode softstore lookup response: %w", err)
+		return "", 0, fmt.Errorf("decode softstore lookup response: %w", err)
 	}
-	return parsed.ProductCode, nil
+	if parsed.Seats <= 0 {
+		parsed.Seats = 1
+	}
+	return parsed.ProductCode, parsed.Seats, nil
 }
 
 // clearCart calls softstore's internal API to empty a cart after its
@@ -241,9 +245,9 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 
 	unitIndex := 0
 	for _, li := range lineItems {
-		productCode, err := s.products.resolveProductCode(li.Price.ID)
+		productCode, seats, err := s.products.resolveProduct(li.Price.ID)
 		if err != nil {
-			log.Println("stripe webhook: resolve product code failed for session", obj.ID,
+			log.Println("stripe webhook: resolve product failed for session", obj.ID,
 				"price", li.Price.ID, ":", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -251,7 +255,7 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 
 		for i := int64(0); i < li.Quantity; i++ {
 			txnID := fmt.Sprintf("%s#%d", obj.ID, unitIndex)
-			if err := s.st.Enqueue(txnID, li.Price.ID, productCode, obj.CustomerDetails.Email, 1); err != nil {
+			if err := s.st.Enqueue(txnID, li.Price.ID, productCode, obj.CustomerDetails.Email, int(seats)); err != nil {
 				log.Println("stripe webhook: enqueue failed for", txnID, ":", err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return

@@ -45,21 +45,25 @@ func (f *fakeLineItems) fetchLineItems(sessionID string) ([]stripeLineItem, erro
 	return f.items[sessionID], nil
 }
 
-// fakeProducts is a test double for productResolver.
 type fakeProducts struct {
 	codes map[string]string // priceID -> productCode
+	seats map[string]int64  // priceID -> seats (defaults to 1 if unset)
 	err   error
 }
 
-func (f *fakeProducts) resolveProductCode(priceID string) (string, error) {
+func (f *fakeProducts) resolveProduct(priceID string) (string, int64, error) {
 	if f.err != nil {
-		return "", f.err
+		return "", 0, f.err
 	}
 	code, ok := f.codes[priceID]
 	if !ok {
-		return "", fmt.Errorf("no product code mapped for price %s", priceID)
+		return "", 0, fmt.Errorf("no product code mapped for price %s", priceID)
 	}
-	return code, nil
+	seats := f.seats[priceID]
+	if seats <= 0 {
+		seats = 1
+	}
+	return code, seats, nil
 }
 
 // fakeCarts is a test double for cartClearer.
@@ -523,5 +527,61 @@ func TestWebhookClearCartFailureDoesNotFailWebhook(t *testing.T) {
 	}
 	if pending == nil {
 		t.Fatal("expected the license to still be enqueued despite cart clear failure")
+	}
+}
+
+func TestWebhookUsesRealSeatsFromProductResolver(t *testing.T) {
+	s := testQueueStore(t)
+	api := &stripeAPI{
+		st:     s,
+		secret: "whsec_test",
+		lineItems: &fakeLineItems{
+			items: map[string][]stripeLineItem{
+				"cs_test_seats": {
+					{Quantity: 1, Price: struct {
+						ID string `json:"id"`
+					}{ID: "price_team"}},
+				},
+			},
+		},
+		products: &fakeProducts{
+			codes: map[string]string{"price_team": "TEAM"},
+			seats: map[string]int64{"price_team": 5},
+		},
+		carts: &fakeCarts{},
+	}
+
+	body := `{
+		"type": "checkout.session.completed",
+		"data": {
+			"object": {
+				"id": "cs_test_seats",
+				"customer_details": {
+					"email": "buyer@example.com",
+					"address": {"country": "US"}
+				}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/stripe/webhook", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", signPayload("whsec_test", body, time.Now().Unix()))
+	w := httptest.NewRecorder()
+
+	api.webhook(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	req2, err := s.NextPending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req2 == nil {
+		t.Fatal("expected a queued request, got nil")
+	}
+	if req2.Seats != 5 {
+		t.Errorf("expected seats 5 from product resolver, got %d", req2.Seats)
 	}
 }

@@ -30,6 +30,7 @@ func TestSessionStatusNotFound(t *testing.T) {
 }
 
 func TestSessionStatusReadyWithItems(t *testing.T) {
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_fake_for_tests")
 	s := testQueueStore(t)
 	api := &sessionStatusAPI{st: s}
 
