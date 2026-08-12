@@ -95,10 +95,25 @@ func main() {
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 	webhookMux.HandleFunc("POST /license/activate", aa.activate)
 	webhookMux.HandleFunc("GET /internal/sessions/{session_id}/status", requireInternalSecret(internalSecret, statusAPI.status))
+
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher")
 		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher")
 	})
+	webhookMux.HandleFunc("GET /launcher/linux", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher")
+		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher")
+	})
+	webhookMux.HandleFunc("GET /launcher/macos", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", "attachment; filename=shop.lauden.dev-Launcher.zip")
+		http.ServeFile(w, r, "/opt/quartermaster/public/shop.lauden.dev-Launcher.zip")
+	})
+	webhookMux.HandleFunc("GET /launcher/windows", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher.exe")
+		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher.exe")
+	})
+
+
 
 	queueSrv := &http.Server{
 		Addr:    "10.46.0.1:9090",
