@@ -25,6 +25,7 @@ var productPaths = map[string]string{
 	"RAYY": "/opt/quartermaster/products/shrink-ray-3000.zip",
 	"OVEN": "/opt/quartermaster/products/quantum-oven-manual.zip",
 	"YETI": "/opt/quartermaster/products/arctic-yeti-care-guide.zip",
+	"LAMP": "/opt/quartermaster/products/lava-lamp.zip",
 }
 
 func productPath(product string) (string, error) {
