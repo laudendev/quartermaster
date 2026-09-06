@@ -169,7 +169,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 	params := &resend.SendEmailRequest{
 		From:    "licenses@lauden.dev",
 		To:      []string{to},
-		ReplyTo: "tlauden@duck.com", // your real inbox
+		ReplyTo: "hello@lauden.dev",
 		Subject: subject,
 		Html:    buildReceiptHTML(receiptItems, taxLine, totalLine, purchaseDate),
 		Text:    buildReceiptText(receiptItems, taxLine, totalLine, purchaseDate),
