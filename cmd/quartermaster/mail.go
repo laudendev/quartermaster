@@ -184,6 +184,8 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 	return nil
 }
 
+const activateHint = "To activate, open the software and paste the key into its license field."
+
 func buildReceiptText(items []receiptLineItem, taxLine, totalLine, purchaseDate string) string {
 	var b strings.Builder
 	b.WriteString("Thank you for your purchase!\n\n")
@@ -203,6 +205,7 @@ func buildReceiptText(items []receiptLineItem, taxLine, totalLine, purchaseDate 
 		b.WriteString(fmt.Sprintf("Total paid: %s\n", totalLine))
 	}
 	b.WriteString(fmt.Sprintf("Date: %s\n\n", purchaseDate))
+	b.WriteString(activateHint + "\n\n")
 	b.WriteString("Keep these keys safe — each is tied to its product and you'll need it to activate your software.\n\n")
 	b.WriteString("Questions? Just reply to this email.\n\n")
 	b.WriteString("— Tyler L. Laudenslager, lauden.dev\n")
@@ -252,9 +255,9 @@ func buildReceiptHTML(items []receiptLineItem, taxLine, totalLine, purchaseDate 
 	}
 	totalRow := totalsRows.String()
 
-	licenseNote := "Keep this safe — it's tied to your product and you'll need it to activate your software."
+	licenseNote := activateHint + " Keep this safe — it's tied to your product and you'll need it to activate your software."
 	if len(items) > 1 {
-		licenseNote = "Keep these safe — each key is tied to its own product and you'll need it to activate that software."
+		licenseNote = activateHint + " Keep these safe — each key is tied to its own product and you'll need it to activate that software."
 	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
