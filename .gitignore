@@ -17,3 +17,4 @@ signing.pub
 *.db-shm
 .env
 .env.local
+/qm-admin-linux
