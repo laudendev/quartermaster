@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"quartermaster/activations"
 	"quartermaster/license"
@@ -26,6 +29,7 @@ var productPaths = map[string]string{
 	"OVEN": "/opt/quartermaster/products/quantum-oven-manual.zip",
 	"YETI": "/opt/quartermaster/products/arctic-yeti-care-guide.zip",
 	"LAMP": "/opt/quartermaster/products/lava-lamp.zip",
+	"POPF": "/opt/quartermaster/products/popfocus/popfocus.zip",
 }
 
 func productPath(product string) (string, error) {
@@ -36,10 +40,34 @@ func productPath(product string) (string, error) {
 	return path, nil
 }
 
+// platformPaths holds per-OS builds for products that ship installers. The
+// launcher sends its OS ("linux", "macos", "windows"); older launchers send
+// nothing and get the product's default file from productPaths. The base name
+// of each path is the filename the buyer receives.
+var platformPaths = map[string]map[string]string{
+	"POPF": {
+		"linux":   "/opt/quartermaster/products/popfocus/popfocus_amd64.deb",
+		"macos":   "/opt/quartermaster/products/popfocus/PopFocus.dmg",
+		"windows": "/opt/quartermaster/products/popfocus/PopFocus-setup.exe",
+	},
+}
+
+// productFile picks the file to serve for a product on a platform, falling
+// back to the product's default file when the platform is empty or unknown.
+func productFile(product, platform string) (string, error) {
+	if byOS, ok := platformPaths[product]; ok {
+		if path, ok := byOS[platform]; ok {
+			return path, nil
+		}
+	}
+	return productPath(product)
+}
+
 func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LicenseKey  string `json:"license_key"`
 		Fingerprint string `json:"fingerprint"`
+		Platform    string `json:"platform"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.LicenseKey == "" || body.Fingerprint == "" {
 		log.Println("download: bad request")
@@ -87,6 +115,18 @@ func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	path, err := productFile(l.Product, body.Platform)
+	if err != nil {
+		log.Println("download: no product file for", l.Product, body.Platform, ":", err)
+		http.Error(w, "product unavailable", http.StatusInternalServerError)
+		return
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		log.Println("download: product file missing for", l.Product, body.Platform, ":", statErr)
+		http.Error(w, "product unavailable", http.StatusInternalServerError)
+		return
+	}
+
 	activationID, err := newActivationID()
 	if err != nil {
 		log.Println("download: id generation failed:", err)
@@ -99,14 +139,8 @@ func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, err := productPath(l.Product)
-	if err != nil {
-		log.Println("download: no product file for", l.Product, ":", err)
-		http.Error(w, "product unavailable", http.StatusInternalServerError)
-		return
-	}
-
 	log.Println("download: activated and serving — license", licenseID, "fingerprint", body.Fingerprint, "product", l.Product)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}))
 	http.ServeFile(w, r, path)
 }
 
