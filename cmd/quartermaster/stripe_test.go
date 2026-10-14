@@ -154,6 +154,7 @@ func TestWebhookRejectsNonUSCountry(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_nonus",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "DE"}
@@ -206,6 +207,7 @@ func TestWebhookEnqueuesValidUSCheckout(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_us",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -279,6 +281,7 @@ func TestWebhookRejectsSeatsOverMax(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_toomanyseats",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -336,6 +339,7 @@ func TestWebhookEnqueuesMultipleDistinctProducts(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_cart",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -405,6 +409,7 @@ func TestWebhookClearsCartWhenTokenPresent(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_withcart",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -454,6 +459,7 @@ func TestWebhookSkipsCartClearWhenNoToken(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_nocart",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -502,6 +508,7 @@ func TestWebhookClearCartFailureDoesNotFailWebhook(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_clearfails",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}
@@ -556,6 +563,7 @@ func TestWebhookUsesRealSeatsFromProductResolver(t *testing.T) {
 		"data": {
 			"object": {
 				"id": "cs_test_seats",
+				"payment_status": "paid",
 				"customer_details": {
 					"email": "buyer@example.com",
 					"address": {"country": "US"}

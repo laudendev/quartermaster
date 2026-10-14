@@ -66,6 +66,7 @@ type stripeEvent struct {
 	Data struct {
 		Object struct {
 			ID              string `json:"id"`
+			PaymentStatus   string `json:"payment_status"`
 			CustomerDetails struct {
 				Email   string `json:"email"`
 				Address struct {
@@ -211,8 +212,13 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // acknowledge, ignore other event types
 		return
 	}
-
 	obj := evt.Data.Object
+	if obj.PaymentStatus != "paid" {
+		log.Println("stripe webhook: not fulfilling session", obj.ID, "payment_status", obj.PaymentStatus)
+		alertUnfulfilled("session not paid", obj.ID, obj.CustomerDetails.Email, "payment_status="+obj.PaymentStatus)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if !strings.EqualFold(obj.CustomerDetails.Address.Country, "US") {
 		// Out of the market we're registered to sell in. Acknowledge the
 		// webhook so Stripe doesn't retry, but never enqueue.
@@ -220,6 +226,7 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 			obj.ID,
 			"country",
 			obj.CustomerDetails.Address.Country)
+		alertUnfulfilled("paid session rejected: non-US billing country", obj.ID, obj.CustomerDetails.Email, "country="+obj.CustomerDetails.Address.Country)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -239,6 +246,7 @@ func (s *stripeAPI) webhook(w http.ResponseWriter, r *http.Request) {
 	if totalUnits > maxUnitsPerSession {
 		log.Println("stripe webhook: rejecting session", obj.ID,
 			"- total units", totalUnits, "exceeds maximum of", maxUnitsPerSession)
+		alertUnfulfilled("paid session rejected: too many units", obj.ID, obj.CustomerDetails.Email, fmt.Sprint("units=", totalUnits))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
