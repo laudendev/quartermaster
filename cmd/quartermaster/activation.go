@@ -63,11 +63,33 @@ func productFile(product, platform string) (string, error) {
 	return productPath(product)
 }
 
+// distroPaths holds distro-family builds, keyed "<platform>/<distro>". The
+// launcher sends a distro only when it recognises one (currently "fedora",
+// which covers Fedora and derivatives such as Nobara). Anything else on that
+// platform keeps the platformPaths file.
+var distroPaths = map[string]map[string]string{
+	"POPF": {
+		"linux/fedora": "/opt/quartermaster/products/popfocus/popfocus_x86_64.rpm",
+	},
+}
+
+// productFileFor is productFile plus an optional distro refinement. An empty
+// or unrecognised distro (older launchers) falls through to productFile.
+func productFileFor(product, platform, distro string) (string, error) {
+	if distro != "" {
+		if path, ok := distroPaths[product][platform+"/"+distro]; ok {
+			return path, nil
+		}
+	}
+	return productFile(product, platform)
+}
+
 func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LicenseKey  string `json:"license_key"`
 		Fingerprint string `json:"fingerprint"`
 		Platform    string `json:"platform"`
+		Distro      string `json:"distro"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.LicenseKey == "" || body.Fingerprint == "" {
 		log.Println("download: bad request")
@@ -115,7 +137,7 @@ func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	path, err := productFile(l.Product, body.Platform)
+	path, err := productFileFor(l.Product, body.Platform, body.Distro)
 	if err != nil {
 		log.Println("download: no product file for", l.Product, body.Platform, ":", err)
 		http.Error(w, "product unavailable", http.StatusInternalServerError)
