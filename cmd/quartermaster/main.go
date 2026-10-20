@@ -14,6 +14,7 @@ import (
 
 	"quartermaster/activations"
 	"quartermaster/queue"
+	"quartermaster/trials"
 )
 
 func openDB(path string) (*sql.DB, error) {
@@ -85,6 +86,19 @@ func main() {
 
 	aa := &activationAPI{st: a, pubs: []ed25519.PublicKey{pub}}
 
+	tr, err := trials.Open(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The online trial key (cmd/trial-keygen). Without it purchases and
+	// activations still work; only /trial/start answers 503.
+	trialKey, err := loadTrialKey("trial.key")
+	if err != nil {
+		log.Println("trial key not loaded; /trial/start will answer 503:", err)
+		trialKey = nil
+	}
+	ta := &trialAPI{st: tr, key: trialKey, now: time.Now}
+
 	webhookMux := http.NewServeMux()
 
 	statusAPI := &sessionStatusAPI{st: q}
@@ -94,6 +108,7 @@ func main() {
 	webhookMux.HandleFunc("POST /license/download", aa.download)
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 	webhookMux.HandleFunc("POST /license/activate", aa.activate)
+	webhookMux.HandleFunc("POST /trial/start", ta.start)
 	webhookMux.HandleFunc("GET /internal/sessions/{session_id}/status", requireInternalSecret(internalSecret, statusAPI.status))
 
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
