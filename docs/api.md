@@ -268,3 +268,35 @@ for email delivery.
 | `400` | Missing session ID in the path. |
 | `401` | Missing or incorrect `X-Internal-Secret`. |
 | `500` | Internal error (store read failure). |
+
+## POST /v2/trial/start
+
+Starts or restores a computer's free trial (Pop Focus 0.1.12 and later). The
+computer is identified by a set of hardware signals instead of one
+fingerprint; each signal is the SHA-256 (64 hex characters) of one hardware
+identifier, computed on the computer. The server never sees the identifiers.
+
+Request:
+
+```json
+{"product":"POPF","signals":[{"kind":"uuid","hash":"<64 hex>"},{"kind":"serial","hash":"<64 hex>"}]}
+```
+
+- 1 to 8 signals; `kind` is one of `uuid`, `serial`, `board`, `disk`, `os`.
+  `os` is a fallback for computers with no readable hardware identifier and
+  must be sent alone. Hashes must not repeat.
+- A client-supplied start date is not accepted: a computer's first request
+  starts a fresh 14-day trial.
+
+Matching, in one transaction: a computer belongs to the trial that owns any of
+its signals. If none is owned, a new trial starts. If one trial owns some, that
+trial is returned and signals nobody owns are added to it (at most 16 per
+trial), so replacing a part keeps the trial. If several trials own some, they
+are not merged and no signal is reassigned; the trial matching the most
+signals wins (ties: earliest start, then lowest id).
+
+Response (200): `{"token", "started_at", "ends_at", "existing"}`. The token is
+a version 2 trial token whose binding is
+`SHA-256("quartermaster-trial-binding\0" || product || sorted signal hashes)`
+of the signals sent in this request. Errors: 400 bad request, 503 no trial
+key, 500 store failure. `POST /trial/start` (v1) is unchanged.

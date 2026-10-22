@@ -65,7 +65,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := run(dbStore{st, db}, *product, flag.Args(), time.Now(), os.Stdout); err != nil {
+	st2, err := trials.OpenV2(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var runErr error
+	if isV2Command(flag.Args()) {
+		runErr = runV2(st2, *product, flag.Args(), time.Now(), os.Stdout)
+	} else {
+		runErr = run(dbStore{st, db}, *product, flag.Args(), time.Now(), os.Stdout)
+	}
+	if err := runErr; err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		if errors.Is(err, errUsage) {
 			os.Exit(2)

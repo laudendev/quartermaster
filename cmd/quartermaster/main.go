@@ -98,6 +98,11 @@ func main() {
 		trialKey = nil
 	}
 	ta := &trialAPI{st: tr, key: trialKey, now: time.Now}
+	tr2, err := trials.OpenV2(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ta2 := &trialV2API{st: tr2, key: trialKey, now: time.Now}
 
 	webhookMux := http.NewServeMux()
 
@@ -109,6 +114,7 @@ func main() {
 	webhookMux.HandleFunc("POST /license/deactivate", aa.deactivate)
 	webhookMux.HandleFunc("POST /license/activate", aa.activate)
 	webhookMux.HandleFunc("POST /trial/start", ta.start)
+	webhookMux.HandleFunc("POST /v2/trial/start", ta2.start)
 	webhookMux.HandleFunc("GET /internal/sessions/{session_id}/status", requireInternalSecret(internalSecret, statusAPI.status))
 
 	webhookMux.HandleFunc("GET /launcher", func(w http.ResponseWriter, r *http.Request) {
@@ -127,8 +133,6 @@ func main() {
 		w.Header().Set("Content-Disposition", "attachment; filename=lauden-dev-launcher.exe")
 		http.ServeFile(w, r, "/opt/quartermaster/public/lauden-dev-launcher.exe")
 	})
-
-
 
 	queueSrv := &http.Server{
 		Addr:    "10.46.0.1:9090",
