@@ -26,6 +26,9 @@ func Open(db *sql.DB) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	if _, err := db.Exec(schemaSignals); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -63,10 +66,7 @@ func (s *Store) Activate(id, licenseID, fingerprint string) error {
 }
 
 func (s *Store) Deactivate(licenseID, fingerprint string) error {
-	_, err := s.db.Exec(
-		`DELETE FROM activations WHERE license_id = ? AND fingerprint = ?`,
-		licenseID, fingerprint)
-	return err
+	return s.DeactivateSeat(licenseID, fingerprint, nil)
 }
 
 func (s *Store) IsActivated(licenseID, fingerprint string) (bool, error) {

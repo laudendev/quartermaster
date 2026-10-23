@@ -168,11 +168,19 @@ func (a *activationAPI) download(w http.ResponseWriter, r *http.Request) {
 
 func (a *activationAPI) activate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		LicenseKey  string `json:"license_key"`
-		Fingerprint string `json:"fingerprint"`
+		LicenseKey  string       `json:"license_key"`
+		Fingerprint string       `json:"fingerprint"`
+		Signals     []signalWire `json:"signals"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.LicenseKey == "" || body.Fingerprint == "" {
 		log.Println("activate: bad request")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sigs, err := parseSignals(body.Signals)
+	if err != nil {
+		log.Println("activate: bad signals:", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -197,55 +205,46 @@ func (a *activationAPI) activate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alreadyActive, err := a.st.IsActivated(licenseID, body.Fingerprint)
-	if err != nil {
-		log.Println("activate: already-active check failed:", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if alreadyActive {
-		// idempotent: same machine re-activating (reinstall) succeeds
-		// without writing a duplicate row or consuming another seat
-		log.Println("activate: already active — license", licenseID, "fingerprint", body.Fingerprint)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	count, err := a.st.CountActivations(licenseID)
-	if err != nil {
-		log.Println("activate: count failed:", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if count >= int(l.Seats) {
-		log.Println("activate: rejected — license", licenseID, "seats exhausted", count, "/", l.Seats)
-		http.Error(w, "no seats available", http.StatusConflict)
-		return
-	}
-
 	activationID, err := newActivationID()
 	if err != nil {
 		log.Println("activate: id generation failed:", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := a.st.Activate(activationID, licenseID, body.Fingerprint); err != nil {
+	// One atomic step: the same computer (fingerprint, or a shared hardware
+	// signal after a reinstall) keeps its seat; otherwise a free seat is taken.
+	res, err := a.st.ClaimSeat(activationID, licenseID, body.Fingerprint, int(l.Seats), sigs, seatClock())
+	if err != nil {
 		log.Println("activate: store write failed:", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if res.Outcome == activations.Full {
+		log.Println("activate: rejected — license", licenseID, "seats exhausted /", l.Seats)
+		http.Error(w, "no seats available", http.StatusConflict)
+		return
+	}
 
-	log.Println("activate: success — license", licenseID, "fingerprint", body.Fingerprint, "product", l.Product)
+	log.Printf("activate: %s — license %s fingerprint %s product %s signals sent %d added %d overlap %v",
+		res.Outcome, licenseID, body.Fingerprint, l.Product, len(sigs), res.Added, res.Overlap)
 	w.WriteHeader(http.StatusOK)
 }
 
 func (a *activationAPI) deactivate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		LicenseKey  string `json:"license_key"`
-		Fingerprint string `json:"fingerprint"`
+		LicenseKey  string       `json:"license_key"`
+		Fingerprint string       `json:"fingerprint"`
+		Signals     []signalWire `json:"signals"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.LicenseKey == "" || body.Fingerprint == "" {
 		log.Println("deactivate: bad request")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sigs, err := parseSignals(body.Signals)
+	if err != nil {
+		log.Println("deactivate: bad signals:", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -258,13 +257,13 @@ func (a *activationAPI) deactivate(w http.ResponseWriter, r *http.Request) {
 	}
 	licenseID := licenseIDString(l)
 
-	if err := a.st.Deactivate(licenseID, body.Fingerprint); err != nil {
+	if err := a.st.DeactivateSeat(licenseID, body.Fingerprint, sigs); err != nil {
 		log.Println("deactivate: store write failed:", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	log.Println("deactivate: success — license", licenseID, "fingerprint", body.Fingerprint)
+	log.Println("deactivate: success — license", licenseID, "fingerprint", body.Fingerprint, "signals sent", len(sigs))
 	w.WriteHeader(http.StatusOK)
 }
 

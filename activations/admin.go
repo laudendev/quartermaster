@@ -39,11 +39,28 @@ func (s *Store) List(licenseID string) ([]Record, error) {
 // activations and returns how many it removed. Revoked rows are kept, so a
 // revoked license cannot be reset into working again.
 func (s *Store) Reset(licenseID string) (int64, error) {
-	res, err := s.db.Exec(
+	claimMu.Lock()
+	defer claimMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE FROM activation_signals WHERE license_id = ? AND activation_id IN
+		   (SELECT id FROM activations WHERE license_id = ? AND revoked = 0)`,
+		licenseID, licenseID); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(
 		`DELETE FROM activations WHERE license_id = ? AND revoked = 0`,
 		licenseID)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }
