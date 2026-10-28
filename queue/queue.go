@@ -102,6 +102,37 @@ func (s *Store) NextPending() (*SignRequest, error) {
 	return &r, nil
 }
 
+// StaleRequest is a sign request still waiting for a signature. It carries
+// no customer data, so it is safe to log and to put in alerts.
+type StaleRequest struct {
+	ID      string
+	Created time.Time
+}
+
+// StalePending lists requests still pending that were created at or before
+// cutoff, oldest first.
+func (s *Store) StalePending(cutoff time.Time) ([]StaleRequest, error) {
+	rows, err := s.db.Query(
+		`SELECT id, created_at FROM sign_requests
+		 WHERE status = 'pending' AND created_at <= ? ORDER BY created_at`,
+		cutoff.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StaleRequest
+	for rows.Next() {
+		var r StaleRequest
+		var created int64
+		if err := rows.Scan(&r.ID, &created); err != nil {
+			return nil, err
+		}
+		r.Created = time.Unix(created, 0)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Complete(id, licenseKey string) (string, string, error) {
 	res, err := s.db.Exec(
 		`UPDATE sign_requests SET status = 'signed', license_key = ?, signed_at = ?

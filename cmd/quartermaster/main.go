@@ -159,6 +159,7 @@ func main() {
 	}()
 
 	go runEmailRetryLoop(q, 5*time.Minute)
+	go runStaleAlertLoop(q, time.Minute)
 
 	log.Println("queue API on", queueSrv.Addr)
 	log.Fatal(queueSrv.ListenAndServe())
