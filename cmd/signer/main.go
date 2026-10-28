@@ -127,7 +127,7 @@ func main() {
 		if req == nil {
 			continue // WaitPending already blocked; loop straight back
 		}
-		log.Printf("got request: %+v", req)
+		log.Printf("got request: id=%v product=%v seats=%v", req.ID, req.Product, req.Seats)
 
 		key, err := issueFor(priv, req)
 		if err != nil {
@@ -137,7 +137,7 @@ func main() {
 			}
 			continue
 		}
-		log.Println("issued key:", key)
+		log.Println("issued key for request", req.ID)
 
 		if err := postComplete(quartermasterBaseURL, req.ID, key); err != nil {
 			log.Println("complete post failed:", err)
