@@ -79,12 +79,15 @@ func main() {
 		carts:    softstoreClient,
 	}
 
-	pub, err := loadPublicKey("signing.pub")
+	// signing.pub is the primary license key; signing2.pub (optional) is a
+	// second trusted key, e.g. the dedicated signer droplet's.
+	pubs, err := loadPublicKeys("signing.pub", "signing2.pub")
 	if err != nil {
-		log.Fatal("loading public key: ", err)
+		log.Fatal("loading public keys: ", err)
 	}
+	log.Printf("trusting %d license public key(s)", len(pubs))
 
-	aa := &activationAPI{st: a, pubs: []ed25519.PublicKey{pub}}
+	aa := &activationAPI{st: a, pubs: pubs}
 
 	tr, err := trials.Open(db)
 	if err != nil {
