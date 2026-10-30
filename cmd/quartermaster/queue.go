@@ -12,9 +12,14 @@ import (
 type queueAPI struct {
 	st          *queue.Store
 	waitTimeout time.Duration // 0 means 55s; tests shorten it
+	polls       *pollTracker  // optional: records signer polls for the heartbeat alert
 }
 
 func (q *queueAPI) wait(w http.ResponseWriter, r *http.Request) {
+	if q.polls != nil {
+		q.polls.touch(time.Now())
+		defer func() { q.polls.touch(time.Now()) }()
+	}
 	minAge, ok := parseMinAge(r.URL.Query().Get("min_age"))
 	if !ok {
 		http.Error(w, "bad min_age", http.StatusBadRequest)

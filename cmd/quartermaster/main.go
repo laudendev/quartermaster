@@ -59,7 +59,8 @@ func main() {
 
 	log.Println("store open")
 
-	qa := &queueAPI{st: q}
+	polls := &pollTracker{}
+	qa := &queueAPI{st: q, polls: polls}
 	queueMux := http.NewServeMux()
 	queueMux.HandleFunc("GET /queue/wait", qa.wait)
 	queueMux.HandleFunc("POST /queue/complete", qa.complete)
@@ -163,6 +164,7 @@ func main() {
 
 	go runEmailRetryLoop(q, 5*time.Minute)
 	go runStaleAlertLoop(q, time.Minute)
+	go runHeartbeatLoop(polls, time.Minute)
 
 	log.Println("queue API on", queueSrv.Addr)
 	log.Fatal(queueSrv.ListenAndServe())

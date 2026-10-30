@@ -35,8 +35,8 @@ func checkStale(src staleSource, now time.Time, threshold time.Duration, alerted
 		}
 		subject := "Quartermaster: order waiting for a signature"
 		body := fmt.Sprintf("Request %s has been waiting %s for the signer.\n\n"+
-			"On the signer machine check: is it awake, is the wg-qmaster tunnel up "+
-			"(sudo wg show), is signer.service running (systemctl status signer)?\n",
+			"On the signer droplet (ssh qm-signer) check: is qm-signer.service running "+
+			"(systemctl status qm-signer), is the wg-qmaster tunnel up (sudo wg show)?\n",
 			r.ID, now.Sub(r.Created).Round(time.Second))
 		if err := sendOpsAlert(subject, body); err != nil {
 			log.Println("ops alert failed:", err)
