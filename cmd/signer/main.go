@@ -40,7 +40,11 @@ type signRequest struct {
 
 func pollOnce(baseURL string) (*signRequest, error) {
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(baseURL + "/queue/wait")
+	target := baseURL + "/queue/wait"
+	if pollMinAge > 0 {
+		target += fmt.Sprintf("?min_age=%d", pollMinAge)
+	}
+	resp, err := client.Get(target)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +93,9 @@ func postComplete(baseURL, id, licenseKey string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return errAlreadySigned
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete failed: status %d", resp.StatusCode)
 	}
@@ -110,12 +117,26 @@ func postReject(baseURL, id, note string) error {
 	}
 	return nil
 }
+
+// pollMinAge is SIGNER_MIN_AGE in seconds: 0 for the primary signer.
+var pollMinAge int
+
+var errAlreadySigned = fmt.Errorf("request was already signed")
+
 func main() {
 	priv, err := loadSigningKey("signing.key")
 	if err != nil {
 		log.Fatal("loading signing key: ", err)
 	}
 	log.Println("signing key loaded,", len(priv), "bytes")
+	age, err := minAgeFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	pollMinAge = age
+	if age > 0 {
+		log.Printf("backup mode: claiming only requests older than %ds", age)
+	}
 
 	for {
 		req, err := pollOnce(quartermasterBaseURL)
@@ -140,7 +161,11 @@ func main() {
 		log.Println("issued key for request", req.ID)
 
 		if err := postComplete(quartermasterBaseURL, req.ID, key); err != nil {
-			log.Println("complete post failed:", err)
+			if err == errAlreadySigned {
+				log.Println("request", req.ID, "was already signed by another signer; discarding this key")
+			} else {
+				log.Println("complete post failed:", err)
+			}
 		} else {
 			log.Println("posted complete")
 		}

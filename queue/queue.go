@@ -89,10 +89,25 @@ type SignRequest struct {
 	Seats   int    `json:"seats"`
 }
 
+// NextPending returns the oldest pending request, whatever its age.
 func (s *Store) NextPending() (*SignRequest, error) {
-	row := s.db.QueryRow(
-		`SELECT id, product, email, seats FROM sign_requests
-		 WHERE status = 'pending' ORDER BY created_at LIMIT 1`)
+	return s.NextPendingOlderThan(0)
+}
+
+// NextPendingOlderThan returns the oldest pending request created at least
+// minAge ago. A backup signer uses it so it only takes work the primary has
+// left unsigned for that long. It does not claim the request: completion is
+// first-writer-wins (see Complete).
+func (s *Store) NextPendingOlderThan(minAge time.Duration) (*SignRequest, error) {
+	query := `SELECT id, product, email, seats FROM sign_requests
+              WHERE status = 'pending' ORDER BY created_at LIMIT 1`
+	var args []any
+	if minAge > 0 {
+		query = `SELECT id, product, email, seats FROM sign_requests
+                 WHERE status = 'pending' AND created_at <= ? ORDER BY created_at LIMIT 1`
+		args = append(args, time.Now().Add(-minAge).Unix())
+	}
+	row := s.db.QueryRow(query, args...)
 	var r SignRequest
 	if err := row.Scan(&r.ID, &r.Product, &r.Email, &r.Seats); err == sql.ErrNoRows {
 		return nil, nil
@@ -251,10 +266,17 @@ func (s *Store) Reject(id, note string) error {
 	return err
 }
 
+// WaitPending blocks up to timeout for any pending request.
 func (s *Store) WaitPending(ctx context.Context, timeout time.Duration) (*SignRequest, error) {
+	return s.WaitPendingOlderThan(ctx, timeout, 0)
+}
+
+// WaitPendingOlderThan blocks up to timeout for a pending request that is at
+// least minAge old. A request that is too fresh becomes eligible while waiting.
+func (s *Store) WaitPendingOlderThan(ctx context.Context, timeout, minAge time.Duration) (*SignRequest, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		r, err := s.NextPending()
+		r, err := s.NextPendingOlderThan(minAge)
 		if r != nil || err != nil {
 			return r, err
 		}

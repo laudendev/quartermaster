@@ -10,11 +10,21 @@ import (
 )
 
 type queueAPI struct {
-	st *queue.Store
+	st          *queue.Store
+	waitTimeout time.Duration // 0 means 55s; tests shorten it
 }
 
 func (q *queueAPI) wait(w http.ResponseWriter, r *http.Request) {
-	req, err := q.st.WaitPending(r.Context(), 55*time.Second)
+	minAge, ok := parseMinAge(r.URL.Query().Get("min_age"))
+	if !ok {
+		http.Error(w, "bad min_age", http.StatusBadRequest)
+		return
+	}
+	timeout := q.waitTimeout
+	if timeout <= 0 {
+		timeout = 55 * time.Second
+	}
+	req, err := q.st.WaitPendingOlderThan(r.Context(), timeout, minAge)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -60,6 +70,11 @@ func (q *queueAPI) complete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Println("queue complete: store update failed for", body.ID, ":", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if txnID == "" {
+		log.Println("queue complete: ignored", body.ID, "- not pending (already signed, rejected or unknown)")
+		http.Error(w, "request is not pending", http.StatusConflict)
 		return
 	}
 	log.Println("queue complete: signed", body.ID)
