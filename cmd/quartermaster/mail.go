@@ -167,7 +167,7 @@ func sendSessionReceiptEmail(sessionID, to string, items []queue.SessionItem) er
 
 	client := resend.NewClient(getResendAPIKey())
 	params := &resend.SendEmailRequest{
-		From:    "licenses@lauden.dev",
+		From:    "lauden.dev <licenses@lauden.dev>",
 		To:      []string{to},
 		ReplyTo: "hello@lauden.dev",
 		Subject: subject,
