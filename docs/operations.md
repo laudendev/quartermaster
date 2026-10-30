@@ -5,68 +5,83 @@ response. This is the doc for "something is on fire, what do I do."
 
 ## Deploy
 
-`./deploy.sh`, run from the repo root on the signer machine
-(`/home/tylerl/quartermaster`) — deliberately run from here, not the
-droplet, since this is also where `signing.key` lives and the script
-needs local access to build and restart the signer.
+`./deploy.sh`, run from the repo root on jellyjamz
+(`~/lauden.dev/quartermaster`). jellyjamz holds no signing key; it only
+builds and ships binaries.
 
 1. Runs the full test suite (`go test ./...`). Aborts on any
    failure — nothing broken ships.
-2. Cross-compiles `quartermaster` for the droplet
+2. Cross-compiles `quartermaster` for qmaster
    (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`), `scp`s it to a staging
-   directory, and an `inotifywait`-based watcher on the droplet
-   detects the new binary and redeploys automatically. Verifies the
-   service is active afterward.
-3. Builds `signer` locally (plain `go build`, no cross-compilation —
-   it already targets the machine it runs on) directly into
-   `/home/tylerl/quartermaster/signer`, the exact path the systemd
-   unit's `ExecStart` expects — build output and deploy target are
-   the same file, so no copy step is needed.
-4. Stops and restarts the `signer` systemd service (`sudo systemctl
-   stop/start signer`) so the new binary takes effect, then verifies
-   it's active.
+   directory, and an `inotifywait`-based watcher on qmaster detects
+   the new binary and redeploys automatically. Verifies the service
+   is active afterward.
+3. Cross-compiles `signer` as a static linux/amd64 binary
+   (`-trimpath -ldflags="-s -w"`), records its sha256, `scp`s it to
+   `qm-signer:/tmp/qm-signer.new` over the WireGuard admin tunnel,
+   verifies the checksum on the droplet, installs it to
+   `/usr/local/bin/qm-signer` (root-owned, mode 755), restarts
+   `qm-signer.service`, and verifies it is active. It prompts for
+   the droplet sudo password.
 
-Both binaries are deployed by one script, one run, from one machine.
-There is no separate signer deploy process.
+Both binaries ship from one script, one run. The qmaster restart and
+the signer restart each interrupt service for a second or two; open
+checkout pages keep polling and recover.
 
-**`deploy.sh` does not copy `signing.pub` to the droplet.** If the
-signing key has been rotated, `signing.pub` must be copied to the
-droplet and `quartermaster` restarted separately — see "Rotating
-the key" below.
+**`deploy.sh` does not copy public keys to qmaster.** If a key is
+added or rotated, copy the new public half to
+`/opt/quartermaster/` and restart `quartermaster` separately — see
+"Rotating the key" below.
 
-Confirmed working end to end: full redeploy plus a live test Stripe
-checkout.
+## Signer droplet (`qm-signer`)
+
+The signing key lives only on the DigitalOcean droplet `qm-signer`.
+jellyjamz no longer signs, so it can sleep without stopping fulfillment.
+
+- **Access:** `ssh qm-signer` (10.30.0.1) over the WireGuard admin
+  tunnel `qm-signer` (10.30.0.0/24, UDP 51830). nftables is
+  default-drop and accepts SSH only on that interface; the DO Cloud
+  Firewall exposes only UDP 51830. If the tunnel is lost, recover from
+  the DO web console.
+- **Queue path:** the droplet reaches qmaster over `wg-qmaster`
+  (10.46.0.3 to 10.46.0.1), long-polls `/queue/wait`, signs, and POSTs
+  `/queue/complete`. Complete is first-writer-wins and returns 409 if
+  the request is no longer pending.
+- **Keys:** `/etc/qm-signer/active.key` (loaded by the unit through
+  systemd `LoadCredential`) and `standby.key`, with matching `.pub`
+  files. Qmaster and app 0.1.19 and later trust both public keys.
+  Private halves are backed up only in KeePassXC. Never enable DO
+  Backups or take snapshots of this droplet: they would copy the key
+  off the box.
+- **Unit:** `qm-signer.service` runs `/usr/local/bin/qm-signer` as a
+  DynamicUser with the empty capability set, `ProtectSystem=strict`,
+  and an `IPAddressAllow` list limited to qmaster.
+- **Monitoring:** qmaster emails an alert if the signer has not polled
+  the queue for 10 minutes, and a recovery notice when it resumes.
+  The stale-request alert still fires for pending requests that sit
+  unsigned.
+- **Not yet done:** a full reboot test of the droplet (default route,
+  both tunnels, nftables, `qm-signer`).
 
 ## Key ceremony
 
-The signing keypair (`signing.key`, `signing.pub`) is generated on
-the signer machine, using `cmd/keygen`:
+The signing keypair is generated on the signer droplet, never on
+jellyjamz. The private key is written to `/etc/qm-signer/` (directory
+mode `0700`, root-owned) and backed up in KeePassXC; the public half
+is copied to qmaster.
 
-```bash
-cd cmd/keygen
-go run .
-```
-
-This writes `signing.key` (mode `0600`) and `signing.pub` (mode
-`0644`) to the current directory. Move both into the repo root
-(`~/quartermaster/`), where the signer's systemd unit expects them
-(`WorkingDirectory=/home/tylerl/quartermaster`).
-
-**`signing.key` never leaves the signer machine, ever, under any
-circumstance.** It is not committed to git (`.gitignore` enforces
-this), not backed up to any third-party service, not copied to the
-droplet, not emailed, not pasted into a chat tool. If this file is
-ever exposed, treat it as a full compromise — see "Incident: signing
+**The private signing key never leaves the droplet except into the
+KeePassXC backup, under any circumstance.** It is not committed to git
+(`.gitignore` enforces this), not covered by DO Backups or snapshots,
+not emailed, not pasted into a chat tool. If a private key is ever
+exposed, treat it as a full compromise — see "Incident: signing
 key exposure" below.
 
-**`signing.key` is also not preserved by any git-based backup or
-history-rewrite tooling** — it is gitignored by design, so a fresh
-clone, a history scrub, or a directory reorganization will never
-carry it along. If the working directory is ever renamed, moved, or
-replaced with a fresh clone, `signing.key` and `signing.pub` must be
-manually copied into the new location, or the signer will fail to
-start (`loading signing key: open signing.key: no such file or
-directory`). This exact failure occurred on 2026-07-19 during a git
+**Historical failure mode (the signer used to run on jellyjamz).**
+The key was gitignored by design, so a fresh clone, a history scrub,
+or a directory reorganization never carried it along, and the signer
+failed to start (`loading signing key: open signing.key: no such file
+or directory`). This exact failure occurred on 2026-07-19 during a git
 history rewrite that swapped the working directory — see "Observed
 in practice" below.
 
@@ -121,7 +136,7 @@ depends on.
 
 ### Rotating the key
 
-1. Generate a new keypair (`cmd/keygen`), on the signer machine.
+1. Generate a new keypair on the signer droplet (never on jellyjamz) and back up the private key in KeePassXC before using it.
 2. If real licenses exist under the current key, add the new key to
    a rotation history table (promote the single-row table above into
    a full history) and append it to `activationAPI.pubs` in
@@ -129,17 +144,17 @@ depends on.
    a historical key once real licenses depend on it. If no real
    licenses exist yet, a clean single-key replacement is fine, as
    was done on 2026-07-19.
-3. Copy `signing.pub` to the droplet (`deploy.sh` does not do this
-   automatically):
-```bash
-   scp signing.pub ty@qmaster:/opt/quartermaster/signing.pub
+3. Copy the new public key to qmaster as
+   `/opt/quartermaster/signing2.pub` (mode 0644; `deploy.sh` does not
+   do this), then restart the server:
+````bash
    ssh qmaster "sudo systemctl restart quartermaster"
 ```
 4. Ship a client app update that adds the new public key to its own
    embedded list, alongside every previous key (only relevant once
    real clients exist and real licenses have been issued under a
    prior key).
-5. The signer now signs new licenses with the new key.
+5. Make it the signer's `active.key` on the droplet (the unit loads that file) and restart `qm-signer`; new licenses are then signed with it.
 
 ## Backups
 
@@ -344,7 +359,7 @@ compromise.
 
 Quartermaster and softstore communicate over a dedicated WireGuard
 tunnel, `10.20.0.0/24` (`wg1` on both droplets) — separate from the
-tunnel the signer uses (`10.46.0.0/24`, `wg0`). Two tunnels
+tunnel the signer droplet uses to reach the queue (`10.46.0.0/24`; `wg0` on qmaster, `wg-qmaster` on the droplet). Two tunnels
 deliberately, not one: the signer and softstore are different trust
 relationships with different peers, and collapsing them would give a
 compromise of either peer network-level reach toward the other.
@@ -424,10 +439,9 @@ directory will leave it behind. If the signer fails to start with
    procedure, except the risk is unavailability of the old key for
    future verification rather than forgery — the old key must be
    sourced from a backup (if one exists) or those licenses will need
-   an alternative verification path. This is exactly why a
-   `signing.key` backup strategy (separate from this repo's git
-   history, per its "never leaves the signer machine" rule) should
-   be revisited before real licenses are issued at volume.
+   an alternative verification path. This is exactly why both signing keys are backed up in KeePassXC
+   (separate from this repo's git history, and never via DO
+   snapshots), and why that backup should be tested periodically.
 
 ## Incident: secret exposure in git history
 
