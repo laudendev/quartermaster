@@ -261,12 +261,20 @@ func buildReceiptHTML(items []receiptLineItem, taxLine, totalLine, purchaseDate 
 	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<body style="margin:0;padding:0;background:#FDF8F0;font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;">
-	<table width="100%%" cellpadding="0" cellspacing="0" style="background:#FDF8F0;padding:32px 16px;">
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light only">
+<title>Your receipt and license key</title>
+<style>:root{color-scheme:light only;supported-color-schemes:light only;}</style>
+</head>
+<body bgcolor="#FDF8F0" style="margin:0;padding:0;background-color:#FDF8F0;font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;">
+	<table width="100%%" cellpadding="0" cellspacing="0" bgcolor="#FDF8F0" style="background-color:#FDF8F0;padding:32px 16px;">
 		<tr>
 			<td align="center">
-				<table width="480" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:16px;overflow:hidden;border:1px solid #EBE4D6;">
+				<table width="480" cellpadding="0" cellspacing="0" bgcolor="#FEFEFE" style="background-color:#FEFEFE;border-radius:16px;overflow:hidden;border:1px solid #EBE4D6;">
 				    <tr>
 					   <td style="padding:32px 32px 8px;">
 					       <img src="https://shop.lauden.dev/static/img/logo-email.png" alt="lauden.dev" width="180" style="display:block;">
@@ -298,7 +306,7 @@ func buildReceiptHTML(items []receiptLineItem, taxLine, totalLine, purchaseDate 
 					<tr>
 						<td style="padding:24px 32px 32px;">
 							<p style="color:#6B7280;font-size:13px;margin:0;">Questions? Just reply to this email — a real person (me) will get it.</p>
-							<p style="color:#9CA3AF;font-size:12px;margin:16px 0 0;">&copy 2026 Laudenslager Software, LLC. All rights reserved.</p>
+							<p style="color:#9CA3AF;font-size:12px;margin:16px 0 0;">&copy; 2026 Laudenslager Software, LLC. All rights reserved.</p>
 						</td>
 					</tr>
 				</table>
