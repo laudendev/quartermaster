@@ -18,3 +18,4 @@ signing.pub
 .env
 .env.local
 /qm-admin-linux
+signer-linux
